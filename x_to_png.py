@@ -294,6 +294,9 @@ def _x_to_png_single(url, output_path, auth_token, verbose, attempt):
         log_info(f"Content column: x={col_x}, width={col_w}", verbose)
 
         # Step 5: Resize viewport tall and take screenshot
+        # Scroll to top first — content may be below the current scroll position
+        page.evaluate("window.scrollTo(0, 0)")
+        page.wait_for_timeout(1000)
         page.set_viewport_size({"width": 1600, "height": 16000})
         page.wait_for_timeout(3000)
 
