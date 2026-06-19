@@ -196,6 +196,93 @@ def find_content_vertical_bounds(img, probe_x=None):
     return content_top, content_bottom
 
 
+def trim_recommendations(img, min_gap=100, min_density=100):
+    """
+    Detect and trim X's post-article recommendations / 'Show more' section.
+
+    X adds sparse recommendation widgets after the article. This function
+    scans from the bottom to find where the dense article content ends
+    and crops there.
+
+    Args:
+        img: PIL Image (already cropped to content column width)
+        min_gap: Minimum consecutive sparse rows to identify the break (default 100)
+        min_density: Minimum non-white pixels per row to count as 'content' (default 100)
+
+    Returns:
+        Trimmed PIL Image
+    """
+    w, h = img.size
+    step = max(1, h // 500)  # sample rows
+
+    # Build a density profile from bottom to top
+    row_density = []
+    for y in range(h):
+        non_white = sum(1 for x in range(w) if sum(img.getpixel((x, y))[:3]) / 3 < 245)
+        row_density.append(non_white)
+
+    # Find the last row that is part of the dense article content.
+    # Scan from bottom upward: once we see min_gap consecutive rows with
+    # density < min_density, everything below that point is recommendations.
+    sparse_streak = 0
+    content_end = h
+    for y in range(h - 1, -1, -1):
+        if row_density[y] < min_density:
+            sparse_streak += 1
+            if sparse_streak >= min_gap:
+                content_end = y + sparse_streak
+                break
+        else:
+            sparse_streak = 0
+
+    # Only trim if we actually found a recommendation section
+    if content_end < h - 50:
+        return img.crop((0, 0, w, content_end))
+    return img
+
+
+def validate_output(img, verbose=True, min_content_pct=5.0, min_height_px=200):
+    """
+    Validate that the output image has meaningful content.
+
+    Args:
+        img: PIL Image to validate
+        verbose: Print diagnostic info
+        min_content_pct: Minimum percentage of non-white pixels (default 5%)
+        min_height_px: Minimum image height in pixels (default 200)
+
+    Returns:
+        True if valid, False otherwise
+    """
+    w, h = img.size
+    if h < min_height_px:
+        log_info(f"  FAIL: image too short ({h}px < {min_height_px}px)", verbose)
+        return False
+
+    # Sample pixels to estimate content density
+    total_samples = 0
+    non_white = 0
+    step = max(1, w * h // 50000)  # sample up to ~50k pixels
+    for y in range(0, h, max(1, h // 200)):
+        for x in range(0, w, max(1, w // 200)):
+            px = img.getpixel((x, y))
+            total_samples += 1
+            if sum(px[:3]) / 3 < 245:
+                non_white += 1
+
+    if total_samples == 0:
+        return False
+
+    content_pct = 100 * non_white / total_samples
+    log_info(f"  Content: {content_pct:.1f}% ({w}x{h})", verbose)
+
+    if content_pct < min_content_pct:
+        log_info(f"  FAIL: content too low ({content_pct:.1f}% < {min_content_pct}%)", verbose)
+        return False
+
+    return True
+
+
 def x_to_png(url: str, output: str = None, auth_token: str = None,
              verbose: bool = True, retries: int = 1) -> str:
     """
@@ -322,6 +409,9 @@ def _x_to_png_single(url, output_path, auth_token, verbose, attempt):
             probe_x = min(content_right // 2, cropped.width - 1)
             content_top, content_bottom = find_content_vertical_bounds(cropped, probe_x)
 
+            # Trim X recommendations / "Show more" section from the bottom
+            cropped = trim_recommendations(cropped)
+
             # Final crop with small padding
             pad = 15
             x1 = 0
@@ -330,6 +420,14 @@ def _x_to_png_single(url, output_path, auth_token, verbose, attempt):
             y2 = min(content_bottom + pad, cropped.height)
 
             final = cropped.crop((x1, y1, x2, y2))
+
+            # Step 8: Validate output — check it has meaningful content
+            if not validate_output(final, verbose):
+                raise RuntimeError(
+                    "Output image appears empty or too small. "
+                    "Try again with --retries or check the URL."
+                )
+
             final.save(str(output_path))
             log_info(f"Saved: {output_path} ({final.width}x{final.height})", verbose)
 
