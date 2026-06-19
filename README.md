@@ -18,6 +18,12 @@ pip install playwright pillow
 playwright install chromium
 ```
 
+Or install directly from GitHub:
+
+```bash
+pip install git+https://github.com/yeshao/x-to-png.git
+```
+
 ## Usage
 
 ```bash
@@ -62,7 +68,7 @@ python3 x_to_png.py "https://x.com/ylecun/status/1937478294714486912"
 
 # Article with auth
 python3 x_to_png.py "https://x.com/plainionist/status/2067595751341924783" \
-  article.png --auth-token 64d55847...
+  article.png --auth-token YOUR_TOKEN
 
 # Quiet mode for scripts
 python3 x_to_png.py "https://x.com/user/status/123" -q
