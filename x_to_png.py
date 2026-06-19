@@ -136,35 +136,33 @@ def wait_for_content(page, timeout=180, verbose=True):
 
 def find_content_horizontal_bounds(img):
     """
-    Analyze pixel columns to find the horizontal content boundaries.
-    Returns (content_right_x) — left is always 0 since we crop to content column.
-    Uses sampling for speed on tall images.
+    Analyze pixel columns to find the right edge of the main content area.
+    Looks for a sharp drop-off in pixel density (the gap between article and sidebar).
+    Returns content_right_x.
     """
     w, h = img.size
-
-    # For speed, sample every Nth pixel based on image size
     step = max(1, h // 1000)
 
     col_scores = []
     for cx in range(w):
         non_white = 0
-        sampled = 0
         for cy in range(0, h, step):
             px = img.getpixel((cx, cy))
             if sum(px[:3]) / 3 < 245:
                 non_white += 1
-            sampled += 1
-        # Normalize by sample count so we can compare columns fairly
         col_scores.append(non_white)
 
     max_score = max(col_scores) if col_scores else 0
     if max_score == 0:
-        return w  # entirely white image, keep full width
+        return w
 
-    threshold = max_score * 0.01
+    # Find the rightmost column that has "real" content (at least 10% of max).
+    # This ignores sparse sidebar widgets (trending, who-to-follow) that have
+    # a few pixels but are mostly whitespace.
+    content_threshold = max_score * 0.10
     content_right = w
     for cx in range(w - 1, -1, -1):
-        if col_scores[cx] > threshold:
+        if col_scores[cx] >= content_threshold:
             content_right = cx + 1
             break
 
@@ -325,7 +323,7 @@ def _x_to_png_single(url, output_path, auth_token, verbose, attempt):
             pad = 15
             x1 = 0
             y1 = max(0, content_top - pad)
-            x2 = min(content_right + pad, cropped.width)
+            x2 = min(content_right + pad, cropped.width)  # noqa
             y2 = min(content_bottom + pad, cropped.height)
 
             final = cropped.crop((x1, y1, x2, y2))
