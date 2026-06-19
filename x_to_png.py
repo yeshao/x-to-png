@@ -27,6 +27,7 @@ With --auth-token:
 """
 
 import sys
+import os
 import time
 import json
 import argparse
@@ -37,24 +38,28 @@ from playwright.sync_api import sync_playwright
 from PIL import Image
 
 
+# ---------------------------------------------------------------------------
+# Logging helpers
+# ---------------------------------------------------------------------------
+
 def log_info(msg, verbose=True):
-    """Print info message unless quiet mode."""
     if verbose:
         print(msg)
 
 
 def log_warn(msg):
-    """Always print warnings."""
-    print(f"WARNING: { msg}", file=sys.stderr)
+    print(f"WARNING: {msg}", file=sys.stderr)
 
 
 def log_error(msg):
-    """Always print errors."""
     print(f"ERROR: {msg}", file=sys.stderr)
 
 
+# ---------------------------------------------------------------------------
+# URL validation
+# ---------------------------------------------------------------------------
+
 def validate_url(url):
-    """Basic URL validation for X/Twitter posts."""
     url_lower = url.lower()
     valid_domains = ['x.com', 'twitter.com', 'mobile.x.com', 'mobile.twitter.com']
     if not any(domain in url_lower for domain in valid_domains):
@@ -63,8 +68,11 @@ def validate_url(url):
         raise ValueError(f"URL doesn't contain a post path (/status/, /article/, /i/): {url}")
 
 
+# ---------------------------------------------------------------------------
+# Playwright helpers
+# ---------------------------------------------------------------------------
+
 def get_content_column_html_length(page):
-    """Safely get the innerHTML length of the content column."""
     result = page.evaluate("""
         (function() {
             var main = document.querySelector('main');
@@ -77,7 +85,6 @@ def get_content_column_html_length(page):
 
 
 def get_content_column_dims(page):
-    """Get content column bounding box. Returns (x, width) or raises."""
     raw = page.evaluate("""
     (function() {
         var main = document.querySelector('main');
@@ -98,10 +105,6 @@ def get_content_column_dims(page):
 
 
 def wait_for_content(page, timeout=180, verbose=True):
-    """
-    Poll until content column stabilizes or timeout.
-    Returns (html_length, elapsed_seconds).
-    """
     log_info("Waiting for content to load...", verbose)
     start = time.time()
     prev_len = 0
@@ -134,12 +137,129 @@ def wait_for_content(page, timeout=180, verbose=True):
     return content_len, int(time.time() - start)
 
 
+# ---------------------------------------------------------------------------
+# DOM-based boundary detection
+# ---------------------------------------------------------------------------
+
+def detect_discovery_more_vision(screenshot_path, verbose=True):
+    """Use NVIDIA Llama 90b vision model to detect Discovery more boundary."""
+    try:
+        import base64 as b64mod, io as iomod, json as jsonmod, urllib.request as urlreq
+        from PIL import Image as PILImage
+
+        img = PILImage.open(screenshot_path)
+        img_resized = img.resize((400, int(400 * img.height / img.width)))
+        buf = iomod.BytesIO()
+        img_resized.save(buf, format="JPEG", quality=70)
+        img_b64 = b64mod.b64encode(buf.getvalue()).decode()
+
+        api_key = os.environ.get("NVIDIA_API_KEY", "")
+        if not api_key:
+            zshrc = os.path.expanduser("~/.zshrc")
+            if os.path.exists(zshrc):
+                with open(zshrc) as f:
+                    for line in f:
+                        if "NVIDIA_API_KEY" in line and "export" in line:
+                            api_key = line.split("=")[1].strip().strip('"').strip("'")
+                            break
+        if not api_key:
+            return -1
+
+        payload = {
+            "model": "meta/llama-3.2-90b-vision-instruct",
+            "messages": [{"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
+                {"type": "text", "text": 'X/Twitter article screenshot. Look for "Discovery more" or "Show more" section AFTER the article (near bottom). Reply ONLY JSON: {"has_discovery_more": "yes" or "no", "start_pct": "X%"} where start_pct is % from TOP of image.'}
+            ]}],
+            "max_tokens": 50,
+            "temperature": 0
+        }
+
+        req = urlreq.Request(
+            "https://integrate.api.nvidia.com/v1/chat/completions",
+            data=jsonmod.dumps(payload).encode(),
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        )
+        with urlreq.urlopen(req, timeout=120) as resp:
+            result = jsonmod.loads(resp.read())
+            content = result.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+            if content.startswith("```"):
+                lines = content.split("\n")
+                content = "\n".join(lines[1:-1]) if len(lines) > 2 else content
+            data = jsonmod.loads(content)
+            if data.get("has_discovery_more") == "yes":
+                pct = int(str(data["start_pct"]).replace("%", ""))
+                y_pos = int(img.height * pct / 100)
+                log_info(f"Vision: Discovery more at {pct}% (y={y_pos})", verbose)
+                return y_pos
+            return -1
+    except Exception as e:
+        log_info(f"Vision detection failed: {e}", verbose)
+        return -1
+
+
+def find_post_boundary_y(page):
+    """
+    Use DOM queries to find the Y position where the main post ends and
+    recommendations/replies begin. Returns Y position or -1.
+    """
+    result = page.evaluate("""
+    (function() {
+        // Strategy 1: Find the article element and look at its next sibling
+        var article = document.querySelector('article');
+        if (article && article.parentElement) {
+            var parent = article.parentElement;
+            var children = Array.from(parent.children);
+            var articleIdx = children.indexOf(article);
+            if (articleIdx >= 0 && articleIdx < children.length - 1) {
+                var nextEl = children[articleIdx + 1];
+                var rect = nextEl.getBoundingClientRect();
+                if (rect.top > 100) return Math.round(rect.top);
+            }
+        }
+
+        // Strategy 2: Find the last "Show more" / "Discover more" text
+        // that is a leaf node (not a container) and is well below the nav
+        var allElements = document.querySelectorAll('*');
+        var candidates = [];
+        for (var i = 0; i < allElements.length; i++) {
+            var el = allElements[i];
+            var text = el.textContent.trim();
+            var textLower = text.toLowerCase();
+            if ((textLower === 'discover more' || textLower === 'show more' || textLower === 'view more')
+                && el.children.length === 0) {
+                var rect = el.getBoundingClientRect();
+                if (rect.top > 500 && rect.height > 10 && rect.width > 30) {
+                    candidates.push(Math.round(rect.top));
+                }
+            }
+        }
+        if (candidates.length > 0) {
+            candidates.sort(function(a, b) { return b - a; });
+            return candidates[0];
+        }
+
+        // Strategy 3: Look for role="separator" or hr elements below the article
+        var separators = document.querySelectorAll('[role="separator"], hr');
+        for (var i = 0; i < separators.length; i++) {
+            var rect = separators[i].getBoundingClientRect();
+            if (rect.top > 1000) {
+                return Math.round(rect.top);
+            }
+        }
+
+        return -1;
+    })()
+    """)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Pixel analysis helpers
+# ---------------------------------------------------------------------------
+
 def find_content_horizontal_bounds(img):
-    """
-    Analyze pixel columns to find the right edge of the main content area.
-    Looks for a sharp drop-off in pixel density (the gap between article and sidebar).
-    Returns content_right_x.
-    """
+    """Find the right edge of the main content area."""
     w, h = img.size
     step = max(1, h // 1000)
 
@@ -156,9 +276,6 @@ def find_content_horizontal_bounds(img):
     if max_score == 0:
         return w
 
-    # Find the rightmost column that has "real" content (at least 10% of max).
-    # This ignores sparse sidebar widgets (trending, who-to-follow) that have
-    # a few pixels but are mostly whitespace.
     content_threshold = max_score * 0.10
     content_right = w
     for cx in range(w - 1, -1, -1):
@@ -170,10 +287,7 @@ def find_content_horizontal_bounds(img):
 
 
 def find_content_vertical_bounds(img, probe_x=None):
-    """
-    Find top and bottom content boundaries.
-    Returns (content_top, content_bottom).
-    """
+    """Find top and bottom content boundaries."""
     w, h = img.size
     if probe_x is None:
         probe_x = w // 2
@@ -196,73 +310,77 @@ def find_content_vertical_bounds(img, probe_x=None):
     return content_top, content_bottom
 
 
-def trim_recommendations(img, min_gap=100, min_density=100):
+def trim_recommendations(img, text_density=200):
     """
-    Detect and trim X's post-article recommendations / 'Show more' section.
+    Detect and trim the post-article recommendations section.
 
-    X adds sparse recommendation widgets after the article. This function
-    scans from the bottom to find where the dense article content ends
-    and crops there.
+    Strategy: find the largest gap (consecutive low-density rows) in the
+    lower 60% of the image. If the gap is large enough (>= 100px), it
+    indicates the boundary between the article and the recommendations
+    section. Crop just above it.
 
-    Args:
-        img: PIL Image (already cropped to content column width)
-        min_gap: Minimum consecutive sparse rows to identify the break (default 100)
-        min_density: Minimum non-white pixels per row to count as 'content' (default 100)
-
-    Returns:
-        Trimmed PIL Image
+    For thread posts where replies are interleaved with article text,
+    gaps are small and no trimming happens (which is correct).
     """
     w, h = img.size
-    step = max(1, h // 500)  # sample rows
 
-    # Build a density profile from bottom to top
     row_density = []
     for y in range(h):
         non_white = sum(1 for x in range(w) if sum(img.getpixel((x, y))[:3]) / 3 < 245)
         row_density.append(non_white)
 
-    # Find the last row that is part of the dense article content.
-    # Scan from bottom upward: once we see min_gap consecutive rows with
-    # density < min_density, everything below that point is recommendations.
-    sparse_streak = 0
-    content_end = h
-    for y in range(h - 1, -1, -1):
-        if row_density[y] < min_density:
-            sparse_streak += 1
-            if sparse_streak >= min_gap:
-                content_end = y + sparse_streak
-                break
+    # Find all gaps (consecutive rows with density < text_density)
+    gaps = []
+    gap_start = None
+    for y in range(h):
+        if row_density[y] < text_density:
+            if gap_start is None:
+                gap_start = y
         else:
-            sparse_streak = 0
+            if gap_start is not None and (y - gap_start) >= 20:
+                gaps.append((gap_start, y, y - gap_start))
+            gap_start = None
+    if gap_start is not None and (h - gap_start) >= 20:
+        gaps.append((gap_start, h, h - gap_start))
 
-    # Only trim if we actually found a recommendation section
-    if content_end < h - 50:
+    if not gaps:
+        return img
+
+    # Find the largest gap in the lower 60% of the image
+    lower_threshold = int(h * 0.4)
+    best_gap = None
+    best_gap_size = 0
+    for g_start, g_end, g_size in gaps:
+        if g_start >= lower_threshold and g_size > best_gap_size:
+            best_gap = (g_start, g_end, g_size)
+            best_gap_size = g_size
+
+    # Only trim if the gap is large (>= 100px)
+    if best_gap is None or best_gap_size < 100:
+        return img
+
+    # Crop just above the largest gap, keeping padding for engagement buttons
+    content_end = best_gap[0]
+    pad = min(80, content_end // 4)
+    content_end = max(content_end - pad, 0)
+
+    if content_end > 50:
         return img.crop((0, 0, w, content_end))
     return img
 
 
+# ---------------------------------------------------------------------------
+# Output validation
+# ---------------------------------------------------------------------------
+
 def validate_output(img, verbose=True, min_content_pct=5.0, min_height_px=200):
-    """
-    Validate that the output image has meaningful content.
-
-    Args:
-        img: PIL Image to validate
-        verbose: Print diagnostic info
-        min_content_pct: Minimum percentage of non-white pixels (default 5%)
-        min_height_px: Minimum image height in pixels (default 200)
-
-    Returns:
-        True if valid, False otherwise
-    """
     w, h = img.size
     if h < min_height_px:
         log_info(f"  FAIL: image too short ({h}px < {min_height_px}px)", verbose)
         return False
 
-    # Sample pixels to estimate content density
     total_samples = 0
     non_white = 0
-    step = max(1, w * h // 50000)  # sample up to ~50k pixels
     for y in range(0, h, max(1, h // 200)):
         for x in range(0, w, max(1, w // 200)):
             px = img.getpixel((x, y))
@@ -283,21 +401,11 @@ def validate_output(img, verbose=True, min_content_pct=5.0, min_height_px=200):
     return True
 
 
-def x_to_png(url: str, output: str = None, auth_token: str = None,
-             verbose: bool = True, retries: int = 1) -> str:
-    """
-    Convert an X post URL to a single-column PNG.
+# ---------------------------------------------------------------------------
+# Main conversion function
+# ---------------------------------------------------------------------------
 
-    Args:
-        url: Full URL to the X post
-        output: Output PNG path (default: <tweet_id>.png in current dir)
-        auth_token: Optional X auth_token cookie for logged-in content
-        verbose: Print progress messages
-        retries: Number of times to retry if content doesn't load (default: 1)
-
-    Returns:
-        Path to the saved PNG file
-    """
+def x_to_png(url, output=None, auth_token=None, verbose=True, retries=1):
     validate_url(url)
 
     if output is None:
@@ -322,7 +430,6 @@ def x_to_png(url: str, output: str = None, auth_token: str = None,
 
 
 def _x_to_png_single(url, output_path, auth_token, verbose, attempt):
-    """Single attempt to capture and crop the X post."""
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
@@ -335,13 +442,11 @@ def _x_to_png_single(url, output_path, auth_token, verbose, attempt):
             locale="en-US",
         )
 
-        # Stealth: override bot detection signals
         context.add_init_script("""
             Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
             window.chrome = { runtime: {} };
         """)
 
-        # Set auth cookie if provided
         if auth_token:
             context.add_cookies([{
                 "name": "auth_token",
@@ -354,7 +459,7 @@ def _x_to_png_single(url, output_path, auth_token, verbose, attempt):
 
         page = context.new_page()
 
-        # Step 1: Visit homepage to get fresh ct0 CSRF cookie
+        # Step 1: Visit homepage to get fresh ct0
         log_info("Visiting x.com to establish session...", verbose)
         page.goto("https://x.com", wait_until="domcontentloaded", timeout=30000)
         page.wait_for_timeout(5000)
@@ -380,14 +485,17 @@ def _x_to_png_single(url, output_path, auth_token, verbose, attempt):
 
         log_info(f"Content column: x={col_x}, width={col_w}", verbose)
 
-        # Step 5: Resize viewport tall and take screenshot
-        # Scroll to top first — content may be below the current scroll position
+        # Step 4b: Find boundary via DOM (fast, free)
+        boundary_y = find_post_boundary_y(page)
+        if boundary_y > 0:
+            log_info(f"DOM boundary at y={boundary_y}", verbose)
+
+        # Step 5: Resize viewport and take screenshot
         page.evaluate("window.scrollTo(0, 0)")
         page.wait_for_timeout(1000)
         page.set_viewport_size({"width": 1600, "height": 16000})
         page.wait_for_timeout(3000)
 
-        # Use temp file for intermediate screenshot
         with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
             screenshot_path = tmp.name
 
@@ -395,33 +503,57 @@ def _x_to_png_single(url, output_path, auth_token, verbose, attempt):
             page.screenshot(path=screenshot_path, full_page=True)
             log_info("Full screenshot captured", verbose)
 
-            # Close browser early — we don't need it anymore
             browser.close()
 
             # Step 6: Crop to content column
             img = Image.open(screenshot_path)
             full_w, full_h = img.size
-
             cropped = img.crop((col_x, 0, col_x + col_w, full_h))
 
-            # Step 7: Remove empty side panel via pixel analysis
+            # Step 7a: Horizontal crop (remove side panel)
             content_right = find_content_horizontal_bounds(cropped)
-            probe_x = min(content_right // 2, cropped.width - 1)
-            content_top, content_bottom = find_content_vertical_bounds(cropped, probe_x)
+            cropped = cropped.crop((0, 0, content_right, cropped.height))
 
-            # Trim X recommendations / "Show more" section from the bottom
+            # Step 7b: Trim recommendations from bottom
             cropped = trim_recommendations(cropped)
 
-            # Final crop with small padding
+            # Step 7c: Vision model detection (more accurate but slower)
+            vision_y = detect_discovery_more_vision(screenshot_path, verbose)
+            if vision_y > 0:
+                scale = cropped.height / full_h
+                vision_in_crop = int(vision_y * scale)
+                if 50 < vision_in_crop < cropped.height:
+                    # Use vision boundary if DOM didn't find one, or if
+                    # vision gives a tighter (higher) crop
+                    if boundary_y <= 0 or vision_in_crop <= int(boundary_y * scale):
+                        cropped = cropped.crop((0, 0, cropped.width, vision_in_crop))
+                        log_info(f"Applied vision boundary crop at y={vision_in_crop}", verbose)
+                        boundary_y = vision_y  # update for later use
+
+            # Step 7e: If DOM found a boundary (and vision didn't override), use it
+            if boundary_y > 0 and vision_y <= 0:
+                scale = cropped.height / full_h
+                boundary_in_crop = int(boundary_y * scale)
+                if 50 < boundary_in_crop < cropped.height:
+                    cropped = cropped.crop((0, 0, cropped.width, boundary_in_crop))
+                    log_info(f"Applied DOM boundary crop at y={boundary_in_crop}", verbose)
+
+            # Step 7d: Compute final vertical bounds
+            probe_x = min(content_right // 2, cropped.width - 1)
+            content_top, content_bottom = find_content_vertical_bounds(cropped, probe_x)
+            trimmed_h = cropped.height
+            effective_bottom = min(trimmed_h, content_bottom)
+
+            # Step 7e: Final crop with padding
             pad = 15
             x1 = 0
             y1 = max(0, content_top - pad)
-            x2 = min(content_right + pad, cropped.width)  # noqa
-            y2 = min(content_bottom + pad, cropped.height)
+            x2 = min(content_right + pad, cropped.width)
+            y2 = min(effective_bottom + pad, cropped.height)
 
             final = cropped.crop((x1, y1, x2, y2))
 
-            # Step 8: Validate output — check it has meaningful content
+            # Step 8: Validate output
             if not validate_output(final, verbose):
                 raise RuntimeError(
                     "Output image appears empty or too small. "
@@ -432,11 +564,14 @@ def _x_to_png_single(url, output_path, auth_token, verbose, attempt):
             log_info(f"Saved: {output_path} ({final.width}x{final.height})", verbose)
 
         finally:
-            # Always clean up temp file
             Path(screenshot_path).unlink(missing_ok=True)
 
     return str(output_path)
 
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(
@@ -456,9 +591,9 @@ Examples:
                         help="X auth_token cookie for logged-in content (Articles, private posts)")
     parser.add_argument("--retries", type=int, default=1,
                         help="Number of attempts if content doesn't load (default: 1)")
-    parser.add_argument("--verbose", "-v", action="store_true",
+    parser.add_argument("-v", "--verbose", action="store_true",
                         help="Print detailed progress")
-    parser.add_argument("--quiet", "-q", action="store_true",
+    parser.add_argument("-q", "--quiet", action="store_true",
                         help="Suppress all output except errors")
     args = parser.parse_args()
 
