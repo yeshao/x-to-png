@@ -5,12 +5,13 @@ X/Twitter Post to PNG Converter
 Converts an X post (tweet, article, thread) into a single-column PNG image.
 
 Usage:
-    python3 x_to_png.py <url> [output_path] [--auth-token TOKEN] [--verbose] [--quiet]
+    python3 x_to_png.py <url> [output_path] [--auth-token TOKEN] [--ct0 CT0] [--verbose] [--quiet]
 
 Examples:
     python3 x_to_png.py "https://x.com/user/status/123456"
     python3 x_to_png.py "https://x.com/user/status/123456" my_screenshot.png
     python3 x_to_png.py "https://x.com/user/status/123456" --auth-token abc123 --verbose
+    python3 x_to_png.py "https://x.com/user/status/123456" --auth-token abc123 --ct0 xyz456 --verbose
 
 Requirements:
     pip install playwright pillow
@@ -22,49 +23,67 @@ Without --auth-token:
 
 With --auth-token:
     - Get your auth_token from browser dev tools -> Cookies -> x.com -> auth_token
-    - Visit x.com homepage first in the browser to get a fresh ct0 CSRF cookie
-    - Then the script can access full Articles and logged-in content
+    - Optionally also pass --ct0 for the CSRF token cookie
+    - If --ct0 is not provided, the script visits x.com homepage first to get a fresh ct0
+    - Then the script can access full Articles, replies, and logged-in content
 """
 
-import sys
-import time
-import json
-import argparse
-import tempfile
+import argparse  # noqa: I001
+import json  # noqa: I001
+import os  # noqa: I001
+import sys  # noqa: I001
+import tempfile  # noqa: I001
+import time  # noqa: I001
 from pathlib import Path
 
-from playwright.sync_api import sync_playwright
 from PIL import Image
+from playwright.sync_api import sync_playwright  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# Logging helpers
+# ---------------------------------------------------------------------------
 
 
 def log_info(msg, verbose=True):
-    """Print info message unless quiet mode."""
     if verbose:
         print(msg)
 
 
 def log_warn(msg):
-    """Always print warnings."""
-    print(f"WARNING: { msg}", file=sys.stderr)
+    print(f"WARNING: {msg}", file=sys.stderr)
 
 
 def log_error(msg):
-    """Always print errors."""
     print(f"ERROR: {msg}", file=sys.stderr)
 
 
+# ---------------------------------------------------------------------------
+# URL validation
+# ---------------------------------------------------------------------------
+
+
 def validate_url(url):
-    """Basic URL validation for X/Twitter posts."""
     url_lower = url.lower()
-    valid_domains = ['x.com', 'twitter.com', 'mobile.x.com', 'mobile.twitter.com']
+    valid_domains = ["x.com", "twitter.com", "mobile.x.com", "mobile.twitter.com"]
     if not any(domain in url_lower for domain in valid_domains):
         raise ValueError(f"URL doesn't appear to be an X/Twitter post: {url}")
-    if '/status/' not in url_lower and '/article/' not in url_lower and '/i/' not in url_lower:
-        raise ValueError(f"URL doesn't contain a post path (/status/, /article/, /i/): {url}")
+    if (
+        "/status/" not in url_lower
+        and "/article/" not in url_lower
+        and "/i/" not in url_lower
+    ):
+        raise ValueError(
+            f"URL doesn't contain a post path (/status/, /article/, /i/): {url}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Playwright helpers
+# ---------------------------------------------------------------------------
 
 
 def get_content_column_html_length(page):
-    """Safely get the innerHTML length of the content column."""
     result = page.evaluate("""
         (function() {
             var main = document.querySelector('main');
@@ -77,7 +96,6 @@ def get_content_column_html_length(page):
 
 
 def get_content_column_dims(page):
-    """Get content column bounding box. Returns (x, width) or raises."""
     raw = page.evaluate("""
     (function() {
         var main = document.querySelector('main');
@@ -92,22 +110,18 @@ def get_content_column_dims(page):
     })()
     """)
     dims = json.loads(raw)
-    if 'error' in dims:
-        raise RuntimeError(dims['error'])
-    return dims['contentX'], dims['contentW']
+    if "error" in dims:
+        raise RuntimeError(dims["error"])
+    return dims["contentX"], dims["contentW"]
 
 
 def wait_for_content(page, timeout=180, verbose=True):
-    """
-    Poll until content column stabilizes or timeout.
-    Returns (html_length, elapsed_seconds).
-    """
     log_info("Waiting for content to load...", verbose)
     start = time.time()
     prev_len = 0
     stable_count = 0
 
-    for i in range(timeout // 2):
+    for _ in range(timeout // 2):
         time.sleep(2)
         content_len = get_content_column_html_length(page)
         elapsed = int(time.time() - start)
@@ -116,14 +130,17 @@ def wait_for_content(page, timeout=180, verbose=True):
             log_info(f"  [{elapsed}s] Waiting for page structure...", verbose)
             continue
 
-        if content_len > 50000:
-            log_info(f"  [{elapsed}s] Content fully loaded ({content_len:,} bytes)", verbose)
+        if content_len > 5000:
+            log_info(f"  [{elapsed}s] Content loaded ({content_len:,} bytes)", verbose)
             return content_len, elapsed
 
         if content_len == prev_len and content_len > 10000:
             stable_count += 1
             if stable_count >= 5:
-                log_info(f"  [{elapsed}s] Content stabilized at {content_len:,} bytes", verbose)
+                log_info(
+                    f"  [{elapsed}s] Content stabilized at {content_len:,} bytes",
+                    verbose,
+                )
                 return content_len, elapsed
         elif content_len != prev_len:
             stable_count = 0
@@ -134,37 +151,216 @@ def wait_for_content(page, timeout=180, verbose=True):
     return content_len, int(time.time() - start)
 
 
-def find_content_horizontal_bounds(img):
-    """
-    Analyze pixel columns to find the horizontal content boundaries.
-    Returns (content_right_x) — left is always 0 since we crop to content column.
-    Uses sampling for speed on tall images.
-    """
-    w, h = img.size
+# ---------------------------------------------------------------------------
+# DOM-based boundary detection
+# ---------------------------------------------------------------------------
 
-    # For speed, sample every Nth pixel based on image size
+
+def detect_discovery_more_vision(screenshot_path, verbose=True):
+    """Use NVIDIA Llama 90b vision model to detect Discovery more boundary."""
+    try:
+        import base64 as b64mod  # noqa: E402,I001
+        import io as iomod  # noqa: E402,I001
+        import json as jsonmod  # noqa: E402,I001
+        import urllib.request as urlreq  # noqa: E402,I001
+        from PIL import Image as PILImage  # noqa: E402
+
+        img = PILImage.open(screenshot_path)
+        img_resized = img.resize((400, int(400 * img.height / img.width)))
+        buf = iomod.BytesIO()
+        img_resized.save(buf, format="JPEG", quality=70)
+        img_b64 = b64mod.b64encode(buf.getvalue()).decode()
+
+        api_key = os.environ.get("NVIDIA_API_KEY", "")
+        if not api_key:
+            zshrc = os.path.expanduser("~/.zshrc")
+            if os.path.exists(zshrc):
+                with open(zshrc) as f:
+                    for line in f:
+                        if "NVIDIA_API_KEY" in line and "export" in line:
+                            api_key = line.split("=")[1].strip().strip('"').strip("'")
+                            break
+        if not api_key:
+            return -1
+
+        payload = {
+            "model": "meta/llama-3.2-90b-vision-instruct",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"},
+                        },
+                        {
+                            "type": "text",
+                            "text": 'X/Twitter article screenshot. Look for "Discovery more" or "Show more" section AFTER the article (near bottom). Reply ONLY JSON: {"has_discovery_more": "yes" or "no", "start_pct": "X%"} where start_pct is % from TOP of image.',
+                        },
+                    ],
+                }
+            ],
+            "max_tokens": 50,
+            "temperature": 0,
+        }
+
+        req = urlreq.Request(
+            "https://integrate.api.nvidia.com/v1/chat/completions",
+            data=jsonmod.dumps(payload).encode(),
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+        )
+        with urlreq.urlopen(req, timeout=120) as resp:
+            result = jsonmod.loads(resp.read())
+            content = (
+                result.get("choices", [{}])[0]
+                .get("message", {})
+                .get("content", "")
+                .strip()
+            )
+            if content.startswith("```"):
+                lines = content.split("\n")
+                content = "\n".join(lines[1:-1]) if len(lines) > 2 else content
+            data = jsonmod.loads(content)
+            if data.get("has_discovery_more") == "yes":
+                pct = int(str(data["start_pct"]).replace("%", ""))
+                y_pos = int(img.height * pct / 100)
+                log_info(f"Vision: Discovery more at {pct}% (y={y_pos})", verbose)
+                return y_pos
+            return -1
+    except Exception as e:
+        log_info(f"Vision detection failed: {e}", verbose)
+        return -1
+
+
+def scroll_to_load_all(page, verbose=True):
+    """Incrementally scroll down to trigger lazy loading of all replies."""
+    log_info("Scrolling to load all content...", verbose)
+    prev_count = 0
+    stable_rounds = 0
+    total_scrolls = 0
+    max_scrolls = 50
+
+    for _ in range(max_scrolls):
+        page.evaluate("window.scrollBy(0, 1500)")
+        page.wait_for_timeout(1500)
+        total_scrolls += 1
+
+        new_count = page.evaluate("document.querySelectorAll('article').length")
+        log_info(f"  [scroll {total_scrolls}] articles: {new_count}", verbose)
+
+        if new_count == prev_count and new_count > 0:
+            stable_rounds += 1
+            if stable_rounds >= 3:
+                log_info(f"  All content loaded ({new_count} articles)", verbose)
+                break
+        else:
+            stable_rounds = 0
+        prev_count = new_count
+
+    # Scroll back to top
+    page.evaluate("window.scrollTo(0, 0)")
+    page.wait_for_timeout(1000)
+    return total_scrolls
+
+
+def find_post_boundary_y(page):
+    """
+    Use DOM queries to find the Y position where the main post ends and
+    recommendations/replies begin. Returns Y position or -1.
+    """
+    result = page.evaluate("""
+    (function() {
+        // Strategy 1: Find the last article and look at its next sibling
+        var articles = document.querySelectorAll('article');
+        if (articles.length > 0) {
+            var lastArticle = articles[articles.length - 1];
+            var parent = lastArticle.parentElement;
+            if (parent) {
+                var children = Array.from(parent.children);
+                var articleIdx = children.indexOf(lastArticle);
+                if (articleIdx >= 0 && articleIdx < children.length - 1) {
+                    var nextEl = children[articleIdx + 1];
+                    var rect = nextEl.getBoundingClientRect();
+                    if (rect.top > 100) return Math.round(rect.top);
+                }
+            }
+        }
+
+        // Strategy 2: Find "Show more" / "Discover more" text that appears
+        // AFTER all articles (not the expand button between tweet and replies).
+        // We look for the last occurrence below all articles.
+        var lastArticleBottom = 0;
+        articles = document.querySelectorAll('article');
+        articles.forEach(function(a) {
+            var r = a.getBoundingClientRect();
+            if (r.bottom > lastArticleBottom) lastArticleBottom = r.bottom;
+        });
+
+        var allElements = document.querySelectorAll('*');
+        var candidates = [];
+        for (var i = 0; i < allElements.length; i++) {
+            var el = allElements[i];
+            var text = el.textContent.trim();
+            var textLower = text.toLowerCase();
+            if ((textLower === 'discover more' || textLower === 'show more' || textLower === 'view more')
+                && el.children.length === 0) {
+                var rect = el.getBoundingClientRect();
+                // Must be below all articles (not the expand button)
+                if (rect.top > lastArticleBottom + 50 && rect.height > 10 && rect.width > 30) {
+                    candidates.push(Math.round(rect.top));
+                }
+            }
+        }
+        if (candidates.length > 0) {
+            candidates.sort(function(a, b) { return a - b; });
+            return candidates[0];
+        }
+
+        // Strategy 3: Look for role="separator" or hr elements below all articles
+        var separators = document.querySelectorAll('[role="separator"], hr');
+        for (var i = 0; i < separators.length; i++) {
+            var rect = separators[i].getBoundingClientRect();
+            if (rect.top > lastArticleBottom + 50) {
+                return Math.round(rect.top);
+            }
+        }
+
+        return -1;
+    })()
+    """)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Pixel analysis helpers
+# ---------------------------------------------------------------------------
+
+
+def find_content_horizontal_bounds(img):
+    """Find the right edge of the main content area."""
+    w, h = img.size
     step = max(1, h // 1000)
 
     col_scores = []
     for cx in range(w):
         non_white = 0
-        sampled = 0
         for cy in range(0, h, step):
             px = img.getpixel((cx, cy))
             if sum(px[:3]) / 3 < 245:
                 non_white += 1
-            sampled += 1
-        # Normalize by sample count so we can compare columns fairly
         col_scores.append(non_white)
 
     max_score = max(col_scores) if col_scores else 0
     if max_score == 0:
-        return w  # entirely white image, keep full width
+        return w
 
-    threshold = max_score * 0.01
+    content_threshold = max_score * 0.10
     content_right = w
     for cx in range(w - 1, -1, -1):
-        if col_scores[cx] > threshold:
+        if col_scores[cx] >= content_threshold:
             content_right = cx + 1
             break
 
@@ -172,10 +368,7 @@ def find_content_horizontal_bounds(img):
 
 
 def find_content_vertical_bounds(img, probe_x=None):
-    """
-    Find top and bottom content boundaries.
-    Returns (content_top, content_bottom).
-    """
+    """Find top and bottom content boundaries."""
     w, h = img.size
     if probe_x is None:
         probe_x = w // 2
@@ -198,25 +391,113 @@ def find_content_vertical_bounds(img, probe_x=None):
     return content_top, content_bottom
 
 
-def x_to_png(url: str, output: str = None, auth_token: str = None,
-             verbose: bool = True, retries: int = 1) -> str:
+def trim_recommendations(img, text_density=200):
     """
-    Convert an X post URL to a single-column PNG.
+    Detect and trim the post-article recommendations section.
 
-    Args:
-        url: Full URL to the X post
-        output: Output PNG path (default: <tweet_id>.png in current dir)
-        auth_token: Optional X auth_token cookie for logged-in content
-        verbose: Print progress messages
-        retries: Number of times to retry if content doesn't load (default: 1)
+    Strategy: find the largest gap (consecutive low-density rows) in the
+    lower 60% of the image. If the gap is large enough (>= 100px), it
+    indicates the boundary between the article and the recommendations
+    section. Crop just above it.
 
-    Returns:
-        Path to the saved PNG file
+    For thread posts where replies are interleaved with article text,
+    gaps are small and no trimming happens (which is correct).
     """
+    w, h = img.size
+
+    row_density = []
+    for y in range(h):
+        non_white = sum(1 for x in range(w) if sum(img.getpixel((x, y))[:3]) / 3 < 245)
+        row_density.append(non_white)
+
+    # Find all gaps (consecutive rows with density < text_density)
+    gaps = []
+    gap_start = None
+    for y in range(h):
+        if row_density[y] < text_density:
+            if gap_start is None:
+                gap_start = y
+        else:
+            if gap_start is not None and (y - gap_start) >= 20:
+                gaps.append((gap_start, y, y - gap_start))
+            gap_start = None
+    if gap_start is not None and (h - gap_start) >= 20:
+        gaps.append((gap_start, h, h - gap_start))
+
+    if not gaps:
+        return img
+
+    # Find the largest gap in the lower 60% of the image
+    lower_threshold = int(h * 0.4)
+    best_gap = None
+    best_gap_size = 0
+    for g_start, g_end, g_size in gaps:
+        if g_start >= lower_threshold and g_size > best_gap_size:
+            best_gap = (g_start, g_end, g_size)
+            best_gap_size = g_size
+
+    # Only trim if the gap is large (>= 100px)
+    if best_gap is None or best_gap_size < 100:
+        return img
+
+    # Crop just above the largest gap, keeping padding for engagement buttons
+    content_end = best_gap[0]
+    pad = min(80, content_end // 4)
+    content_end = max(content_end - pad, 0)
+
+    if content_end > 50:
+        return img.crop((0, 0, w, content_end))
+    return img
+
+
+# ---------------------------------------------------------------------------
+# Output validation
+# ---------------------------------------------------------------------------
+
+
+def validate_output(img, verbose=True, min_content_pct=5.0, min_height_px=200):
+    w, h = img.size
+    if h < min_height_px:
+        log_info(f"  FAIL: image too short ({h}px < {min_height_px}px)", verbose)
+        return False
+
+    total_samples = 0
+    non_white = 0
+    for y in range(0, h, max(1, h // 200)):
+        for x in range(0, w, max(1, w // 200)):
+            px = img.getpixel((x, y))
+            total_samples += 1
+            if sum(px[:3]) / 3 < 245:
+                non_white += 1
+
+    if total_samples == 0:
+        return False
+
+    content_pct = 100 * non_white / total_samples
+    log_info(f"  Content: {content_pct:.1f}% ({w}x{h})", verbose)
+
+    if content_pct < min_content_pct:
+        log_info(
+            f"  FAIL: content too low ({content_pct:.1f}% < {min_content_pct}%)",
+            verbose,
+        )
+        return False
+
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Main conversion function
+# ---------------------------------------------------------------------------
+
+
+def x_to_png(
+    url, output=None, auth_token=None, ct0_token=None, verbose=True, retries=1
+):
     validate_url(url)
 
     if output is None:
-        tweet_id = url.rstrip('/').split('/')[-1].split('?')[0].split('#')[0]
+        tweet_id = url.rstrip("/").split("/")[-1].split("?")[0].split("#")[0]
         output = f"{tweet_id}.png"
 
     output_path = Path(output).resolve()
@@ -225,7 +506,9 @@ def x_to_png(url: str, output: str = None, auth_token: str = None,
     last_error = None
     for attempt in range(1, retries + 1):
         try:
-            return _x_to_png_single(url, output_path, auth_token, verbose, attempt)
+            return _x_to_png_single(
+                url, output_path, auth_token, ct0_token, verbose, attempt
+            )
         except RuntimeError as e:
             last_error = e
             if attempt < retries:
@@ -233,15 +516,15 @@ def x_to_png(url: str, output: str = None, auth_token: str = None,
             else:
                 raise
 
-    raise last_error
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("All retries failed with unknown error")
 
 
-def _x_to_png_single(url, output_path, auth_token, verbose, attempt):
-    """Single attempt to capture and crop the X post."""
+def _x_to_png_single(url, output_path, auth_token, ct0_token, verbose, attempt):
     with sync_playwright() as p:
         browser = p.chromium.launch(
-            headless=True,
-            args=['--disable-blink-features=AutomationControlled']
+            headless=True, args=["--disable-blink-features=AutomationControlled"]
         )
         context = browser.new_context(
             viewport={"width": 1600, "height": 900},
@@ -250,26 +533,41 @@ def _x_to_png_single(url, output_path, auth_token, verbose, attempt):
             locale="en-US",
         )
 
-        # Stealth: override bot detection signals
         context.add_init_script("""
             Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
             window.chrome = { runtime: {} };
         """)
 
-        # Set auth cookie if provided
         if auth_token:
-            context.add_cookies([{
-                "name": "auth_token",
-                "value": auth_token,
-                "domain": ".x.com",
-                "path": "/",
-                "httpOnly": True,
-                "secure": True
-            }])
+            context.add_cookies(
+                [
+                    {
+                        "name": "auth_token",
+                        "value": auth_token,
+                        "domain": ".x.com",
+                        "path": "/",
+                        "httpOnly": True,
+                        "secure": True,
+                    }
+                ]
+            )
+        if ct0_token:
+            context.add_cookies(
+                [
+                    {
+                        "name": "ct0",
+                        "value": ct0_token,
+                        "domain": ".x.com",
+                        "path": "/",
+                        "httpOnly": True,
+                        "secure": True,
+                    }
+                ]
+            )
 
         page = context.new_page()
 
-        # Step 1: Visit homepage to get fresh ct0 CSRF cookie
+        # Step 1: Visit homepage to get fresh ct0
         log_info("Visiting x.com to establish session...", verbose)
         page.goto("https://x.com", wait_until="domcontentloaded", timeout=30000)
         page.wait_for_timeout(5000)
@@ -291,52 +589,129 @@ def _x_to_png_single(url, output_path, auth_token, verbose, attempt):
         try:
             col_x, col_w = get_content_column_dims(page)
         except RuntimeError as e:
-            raise RuntimeError(f"Could not find content column: {e}")
+            raise RuntimeError(f"Could not find content column: {e}") from e
 
         log_info(f"Content column: x={col_x}, width={col_w}", verbose)
 
-        # Step 5: Resize viewport tall and take screenshot
+        # Step 4b: Find boundary via DOM (fast, free)
+        boundary_y = find_post_boundary_y(page)
+        if boundary_y > 0:
+            log_info(f"DOM boundary at y={boundary_y}", verbose)
+
+        # Step 5: Scroll to load all lazy content (replies, etc.)
+        scroll_to_load_all(page, verbose=verbose)
+
+        # Step 5b: Find last article bottom (marks end of tweet/reply content)
+        last_article_bottom = page.evaluate("""
+            (function() {
+                var articles = document.querySelectorAll('article');
+                if (articles.length === 0) return -1;
+                var last = articles[articles.length - 1];
+                return Math.round(last.getBoundingClientRect().bottom);
+            })()
+        """)
+        if last_article_bottom > 0:
+            log_info(f"Last article bottom: {last_article_bottom}", verbose)
+
+        # Step 6: Resize viewport and take screenshot
+        page.evaluate("window.scrollTo(0, 0)")
+        page.wait_for_timeout(1000)
         page.set_viewport_size({"width": 1600, "height": 16000})
         page.wait_for_timeout(3000)
 
-        # Use temp file for intermediate screenshot
-        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
             screenshot_path = tmp.name
 
         try:
             page.screenshot(path=screenshot_path, full_page=True)
             log_info("Full screenshot captured", verbose)
 
-            # Close browser early — we don't need it anymore
             browser.close()
 
             # Step 6: Crop to content column
             img = Image.open(screenshot_path)
             full_w, full_h = img.size
-
             cropped = img.crop((col_x, 0, col_x + col_w, full_h))
 
-            # Step 7: Remove empty side panel via pixel analysis
+            # Step 7a: Horizontal crop (remove side panel)
             content_right = find_content_horizontal_bounds(cropped)
+            cropped = cropped.crop((0, 0, content_right, cropped.height))
+
+            # Step 7b: Trim recommendations from bottom
+            cropped = trim_recommendations(cropped)
+
+            # Step 7c: Vision model detection (more accurate but slower)
+            vision_y = detect_discovery_more_vision(screenshot_path, verbose)
+            if vision_y > 0:
+                scale = cropped.height / full_h
+                vision_in_crop = int(vision_y * scale)
+                if 50 < vision_in_crop < cropped.height and (
+                    boundary_y <= 0 or vision_in_crop <= int(boundary_y * scale)
+                ):
+                    cropped = cropped.crop((0, 0, cropped.width, vision_in_crop))
+                    log_info(
+                        f"Applied vision boundary crop at y={vision_in_crop}", verbose
+                    )
+                    boundary_y = vision_y  # update for later use
+
+            # Step 7e: If DOM found a boundary (and vision didn't override), use it
+            if boundary_y > 0 and vision_y <= 0:
+                scale = cropped.height / full_h
+                boundary_in_crop = int(boundary_y * scale)
+                if 50 < boundary_in_crop < cropped.height:
+                    cropped = cropped.crop((0, 0, cropped.width, boundary_in_crop))
+                    log_info(
+                        f"Applied DOM boundary crop at y={boundary_in_crop}", verbose
+                    )
+
+            # Step 7f: Crop at last article bottom (stops before "Discover more")
+            if last_article_bottom > 0:
+                scale = cropped.height / full_h
+                article_bottom_in_crop = int(last_article_bottom * scale)
+                pad = 20
+                if article_bottom_in_crop + pad < cropped.height:
+                    cropped = cropped.crop(
+                        (0, 0, cropped.width, article_bottom_in_crop + pad)
+                    )
+                    log_info(
+                        f"Applied last-article crop at y={article_bottom_in_crop + pad}",
+                        verbose,
+                    )
+
+            # Step 7d: Compute final vertical bounds
             probe_x = min(content_right // 2, cropped.width - 1)
             content_top, content_bottom = find_content_vertical_bounds(cropped, probe_x)
+            trimmed_h = cropped.height
+            effective_bottom = min(trimmed_h, content_bottom)
 
-            # Final crop with small padding
+            # Step 7e: Final crop with padding
             pad = 15
             x1 = 0
             y1 = max(0, content_top - pad)
             x2 = min(content_right + pad, cropped.width)
-            y2 = min(content_bottom + pad, cropped.height)
+            y2 = min(effective_bottom + pad, cropped.height)
 
             final = cropped.crop((x1, y1, x2, y2))
+
+            # Step 8: Validate output
+            if not validate_output(final, verbose):
+                raise RuntimeError(
+                    "Output image appears empty or too small. "
+                    "Try again with --retries or check the URL."
+                )
+
             final.save(str(output_path))
             log_info(f"Saved: {output_path} ({final.width}x{final.height})", verbose)
 
         finally:
-            # Always clean up temp file
             Path(screenshot_path).unlink(missing_ok=True)
 
     return str(output_path)
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
 
 def main():
@@ -348,19 +723,37 @@ Examples:
   %(prog)s "https://x.com/user/status/123456"
   %(prog)s "https://x.com/user/status/123456" output.png
   %(prog)s "https://x.com/user/status/123456" --auth-token TOKEN --verbose
-        """
+        """,
     )
     parser.add_argument("url", help="Full URL to the X post")
-    parser.add_argument("output", nargs="?", default=None,
-                        help="Output PNG path (default: <tweet_id>.png)")
-    parser.add_argument("--auth-token", default=None,
-                        help="X auth_token cookie for logged-in content (Articles, private posts)")
-    parser.add_argument("--retries", type=int, default=1,
-                        help="Number of attempts if content doesn't load (default: 1)")
-    parser.add_argument("--verbose", "-v", action="store_true",
-                        help="Print detailed progress")
-    parser.add_argument("--quiet", "-q", action="store_true",
-                        help="Suppress all output except errors")
+    parser.add_argument(
+        "output",
+        nargs="?",
+        default=None,
+        help="Output PNG path (default: <tweet_id>.png)",
+    )
+    parser.add_argument(
+        "--auth-token",
+        default=None,
+        help="X auth_token cookie for logged-in content (Articles, private posts, replies)",
+    )
+    parser.add_argument(
+        "--ct0",
+        default=None,
+        help="X ct0 CSRF cookie (recommended with --auth-token for reliable login)",
+    )
+    parser.add_argument(
+        "--retries",
+        type=int,
+        default=1,
+        help="Number of attempts if content doesn't load (default: 1)",
+    )
+    parser.add_argument(
+        "-v", "--verbose", action="store_true", help="Print detailed progress"
+    )
+    parser.add_argument(
+        "-q", "--quiet", action="store_true", help="Suppress all output except errors"
+    )
     args = parser.parse_args()
 
     verbose = args.verbose and not args.quiet
@@ -370,8 +763,9 @@ Examples:
             args.url,
             args.output,
             args.auth_token,
+            ct0_token=args.ct0,
             verbose=verbose,
-            retries=args.retries
+            retries=args.retries,
         )
         if not args.quiet:
             print(f"\nDone! Output: {output}")
