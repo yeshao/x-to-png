@@ -28,10 +28,12 @@ python3 x_to_png.py "https://x.com/user/status/123456"
 python3 x_to_png.py "https://x.com/user/status/123456" output.png
 
 # With authentication (for replies, articles, private posts)
-python3 x_to_png.py "https://x.com/user/status/123456" --auth-token TOKEN --ct0 CT0
+python3 x_to_png.py "https://x.com/user/status/123456" \
+    --auth-token TOKEN --ct0 CT0
 
 # Verbose output
-python3 x_to_png.py "https://x.com/user/status/123456" --auth-token TOKEN --ct0 CT0 --verbose
+python3 x_to_png.py "https://x.com/user/status/123456" \
+    --auth-token TOKEN --ct0 CT0 --verbose
 ```
 
 ### Getting Auth Cookies
@@ -42,15 +44,15 @@ python3 x_to_png.py "https://x.com/user/status/123456" --auth-token TOKEN --ct0 
 
 ## Options
 
-| Flag | Description |
-|------|-------------|
-| `url` | Full URL to the X post (required) |
-| `output` | Output PNG path (default: `<tweet_id>.png`) |
-| `--auth-token` | X auth_token cookie for logged-in content |
-| `--ct0` | X ct0 CSRF cookie (recommended with --auth-token) |
-| `--retries N` | Number of attempts if content doesn't load (default: 1) |
-| `-v, --verbose` | Print detailed progress |
-| `-q, --quiet` | Suppress all output except errors |
+| Flag            | Description                                             |
+| --------------- | ------------------------------------------------------- |
+| `url`           | Full URL to the X post (required)                       |
+| `output`        | Output PNG path (default: `<tweet_id>.png`)             |
+| `--auth-token`  | X auth_token cookie for logged-in content               |
+| `--ct0`         | X ct0 CSRF cookie (recommended with --auth-token)       |
+| `--retries N`   | Number of attempts if content doesn't load (default: 1) |
+| `-v, --verbose` | Print detailed progress                                  |
+| `-q, --quiet`   | Suppress all output except errors                       |
 
 ## How It Works
 
@@ -72,7 +74,8 @@ python3 test_x_to_png.py
 python3 -m pytest test_x_to_png.py -v
 ```
 
-39 tests covering URL validation, content boundary detection, recommendation trimming, scrolling, CLI flags, and full layout simulation.
+39 tests covering URL validation, content boundary detection,
+recommendation trimming, scrolling, CLI flags, and full layout simulation.
 
 ## License
 
