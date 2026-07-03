@@ -236,29 +236,34 @@ def detect_discovery_more_vision(screenshot_path, verbose=True):
 
 
 def scroll_to_load_all(page, verbose=True):
-    """Incrementally scroll down to trigger lazy loading of all replies."""
+    """Incrementally scroll down to trigger lazy loading of all content."""
     log_info("Scrolling to load all content...", verbose)
     prev_count = 0
     stable_rounds = 0
     total_scrolls = 0
-    max_scrolls = 50
+    max_scrolls = 200  # Increased for long articles
 
+    prev_height = 0
     for _ in range(max_scrolls):
         page.evaluate("window.scrollBy(0, 1500)")
         page.wait_for_timeout(1500)
         total_scrolls += 1
 
+        # Check article count
         new_count = page.evaluate("document.querySelectorAll('article').length")
         log_info(f"  [scroll {total_scrolls}] articles: {new_count}", verbose)
 
-        if new_count == prev_count and new_count > 0:
+        # Also check page height for long articles
+        new_height = page.evaluate("document.body.scrollHeight")
+        if new_count == prev_count and new_height == prev_height:
             stable_rounds += 1
-            if stable_rounds >= 3:
+            if stable_rounds >= 5:
                 log_info(f"  All content loaded ({new_count} articles)", verbose)
                 break
         else:
             stable_rounds = 0
         prev_count = new_count
+        prev_height = new_height
 
     # Scroll back to top
     page.evaluate("window.scrollTo(0, 0)")
@@ -394,23 +399,19 @@ def find_content_vertical_bounds(img, probe_x=None):
 def trim_recommendations(img, text_density=200):
     """
     Detect and trim the post-article recommendations section.
-
-    Strategy: find the largest gap (consecutive low-density rows) in the
-    lower 60% of the image. If the gap is large enough (>= 100px), it
-    indicates the boundary between the article and the recommendations
-    section. Crop just above it.
-
-    For thread posts where replies are interleaved with article text,
-    gaps are small and no trimming happens (which is correct).
+    Only applies to short images (< 5000px) to avoid cutting long articles.
     """
     w, h = img.size
+    
+    # Skip for long images to avoid cutting article content
+    if h > 5000:
+        return img
 
     row_density = []
     for y in range(h):
         non_white = sum(1 for x in range(w) if sum(img.getpixel((x, y))[:3]) / 3 < 245)
         row_density.append(non_white)
 
-    # Find all gaps (consecutive rows with density < text_density)
     gaps = []
     gap_start = None
     for y in range(h):
@@ -427,7 +428,6 @@ def trim_recommendations(img, text_density=200):
     if not gaps:
         return img
 
-    # Find the largest gap in the lower 60% of the image
     lower_threshold = int(h * 0.4)
     best_gap = None
     best_gap_size = 0
@@ -436,11 +436,9 @@ def trim_recommendations(img, text_density=200):
             best_gap = (g_start, g_end, g_size)
             best_gap_size = g_size
 
-    # Only trim if the gap is large (>= 100px)
     if best_gap is None or best_gap_size < 100:
         return img
 
-    # Crop just above the largest gap, keeping padding for engagement buttons
     content_end = best_gap[0]
     pad = min(80, content_end // 4)
     content_end = max(content_end - pad, 0)
@@ -601,7 +599,10 @@ def _x_to_png_single(url, output_path, auth_token, ct0_token, verbose, attempt):
         # Step 5: Scroll to load all lazy content (replies, etc.)
         scroll_to_load_all(page, verbose=verbose)
 
-        # Step 5b: Find last article bottom (marks end of tweet/reply content)
+        # Step 5b: Find last article bottom AFTER viewport resize
+        page.set_viewport_size({"width": 1600, "height": 16000})
+        page.wait_for_timeout(3000)
+
         last_article_bottom = page.evaluate("""
             (function() {
                 var articles = document.querySelectorAll('article');
@@ -613,11 +614,11 @@ def _x_to_png_single(url, output_path, auth_token, ct0_token, verbose, attempt):
         if last_article_bottom > 0:
             log_info(f"Last article bottom: {last_article_bottom}", verbose)
 
-        # Step 6: Resize viewport and take screenshot
+        # Scroll through the full page to ensure all content is rendered
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        page.wait_for_timeout(2000)
         page.evaluate("window.scrollTo(0, 0)")
         page.wait_for_timeout(1000)
-        page.set_viewport_size({"width": 1600, "height": 16000})
-        page.wait_for_timeout(3000)
 
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
             screenshot_path = tmp.name
