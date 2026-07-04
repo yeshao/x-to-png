@@ -7,13 +7,14 @@ Or:       python3 test_x_to_png.py
 """
 
 import sys
+import os
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 # Ensure the skill directory is on the path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from PIL import Image  # noqa: I001
+from PIL import Image
 
 # Import functions under test
 import x_to_png as xtp
@@ -22,7 +23,6 @@ import x_to_png as xtp
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
 
 def make_test_image(width, height, bg=(255, 255, 255), content_boxes=None):
     """Create a test image with optional content rectangles.
@@ -41,7 +41,6 @@ def make_test_image(width, height, bg=(255, 255, 255), content_boxes=None):
 # ---------------------------------------------------------------------------
 # validate_url
 # ---------------------------------------------------------------------------
-
 
 def test_validate_url_valid_x():
     xtp.validate_url("https://x.com/user/status/123456")
@@ -62,7 +61,7 @@ def test_validate_url_valid_article():
 def test_validate_url_invalid_domain():
     try:
         xtp.validate_url("https://facebook.com/post/123")
-        raise AssertionError("Should have raised ValueError")
+        assert False, "Should have raised ValueError"
     except ValueError as e:
         assert "x.com" in str(e).lower() or "twitter" in str(e).lower()
 
@@ -70,7 +69,7 @@ def test_validate_url_invalid_domain():
 def test_validate_url_invalid_path():
     try:
         xtp.validate_url("https://x.com/login")
-        raise AssertionError("Should have raised ValueError")
+        assert False, "Should have raised ValueError"
     except ValueError as e:
         assert "/status/" in str(e) or "/article/" in str(e) or "/i/" in str(e)
 
@@ -86,7 +85,6 @@ def test_validate_url_with_fragment():
 # ---------------------------------------------------------------------------
 # find_content_horizontal_bounds
 # ---------------------------------------------------------------------------
-
 
 def test_horizontal_full_content():
     """Image with content across full width — should keep full width."""
@@ -116,14 +114,10 @@ def test_horizontal_narrow_content():
 
 def test_horizontal_sparse_sidebar_preserved():
     """Sparse sidebar pixels should be excluded."""
-    img = make_test_image(
-        300,
-        200,
-        content_boxes=[
-            (0, 0, 150, 200, (0, 0, 0)),  # dense content
-            (200, 0, 205, 200, (0, 0, 0)),  # sparse sidebar (5px wide)
-        ],
-    )
+    img = make_test_image(300, 200, content_boxes=[
+        (0, 0, 150, 200, (0, 0, 0)),  # dense content
+        (200, 0, 205, 200, (0, 0, 0)),  # sparse sidebar (5px wide)
+    ])
     result = xtp.find_content_horizontal_bounds(img)
     # The 5px sidebar has ~10% of max density (200*5=1000 vs 200*150=30000)
     # so the 10% threshold may or may not exclude it depending on sampling.
@@ -134,7 +128,6 @@ def test_horizontal_sparse_sidebar_preserved():
 # ---------------------------------------------------------------------------
 # find_content_vertical_bounds
 # ---------------------------------------------------------------------------
-
 
 def test_vertical_content_from_top():
     """Content starts at y=0."""
@@ -172,7 +165,6 @@ def test_vertical_content_at_bottom():
 # trim_recommendations
 # ---------------------------------------------------------------------------
 
-
 def test_trim_no_recommendations():
     """Image with content all the way to the bottom — no trimming."""
     img = make_test_image(100, 200, content_boxes=[(0, 0, 100, 200, (0, 0, 0))])
@@ -182,38 +174,30 @@ def test_trim_no_recommendations():
 
 def test_trim_recommendations_at_bottom():
     """Dense content for 80%, then sparse recommendations for 20%."""
-    img = make_test_image(
-        100,
-        500,
-        content_boxes=[
-            (0, 0, 100, 400, (0, 0, 0)),  # article
-            (0, 400, 10, 500, (0, 0, 0)),  # sparse recommendations
-        ],
-    )
-    result = xtp.trim_recommendations(img, text_density=50)
+    img = make_test_image(100, 500, content_boxes=[
+        (0, 0, 100, 400, (0, 0, 0)),  # article
+        (0, 400, 10, 500, (0, 0, 0)),  # sparse recommendations
+    ])
+    result = xtp.trim_recommendations(img, min_gap=20, min_density=50)
     assert result.height < 500, f"Should have trimmed, got {result.height}"
-    assert result.height >= 300, f"Should keep most content, got {result.height}"
+    assert result.height >= 380, f"Should keep most content, got {result.height}"
 
 
 def test_trim_with_gap_between_content_and_recs():
     """Content, then a gap, then recommendations."""
-    img = make_test_image(
-        100,
-        300,
-        content_boxes=[
-            (0, 0, 100, 200, (0, 0, 0)),  # article
-            # gap at y=200-250
-            (0, 250, 5, 300, (0, 0, 0)),  # sparse recs
-        ],
-    )
-    result = xtp.trim_recommendations(img, text_density=50)
+    img = make_test_image(100, 300, content_boxes=[
+        (0, 0, 100, 200, (0, 0, 0)),  # article
+        # gap at y=200-250
+        (0, 250, 5, 300, (0, 0, 0)),  # sparse recs
+    ])
+    result = xtp.trim_recommendations(img, min_gap=20, min_density=50)
     assert result.height < 260, f"Should trim after gap, got {result.height}"
 
 
 def test_trim_too_short_image():
     """Image too short to have recommendations — no trim."""
     img = make_test_image(100, 40, content_boxes=[(0, 0, 100, 40, (0, 0, 0))])
-    result = xtp.trim_recommendations(img, text_density=50)
+    result = xtp.trim_recommendations(img, min_gap=30, min_density=50)
     assert result.height == 40
 
 
@@ -224,26 +208,21 @@ def test_trim_all_white():
     assert result.height == 500
 
 
-def test_trim_with_gap_not_met():
-    """Sparse section too small to qualify as a gap — no trim."""
-    img = make_test_image(
-        100,
-        300,
-        content_boxes=[
-            (0, 0, 100, 200, (0, 0, 0)),  # article
-            (0, 200, 5, 220, (0, 0, 0)),  # sparse recs (only 20px)
-            (0, 220, 100, 300, (0, 0, 0)),  # more content
-        ],
-    )
-    result = xtp.trim_recommendations(img, text_density=50)
-    # The gap is only 20px which is < 100px min, so no trim should happen
+def test_trim_with_min_gap_not_met():
+    """Sparse section shorter than min_gap — no trim."""
+    img = make_test_image(100, 300, content_boxes=[
+        (0, 0, 100, 200, (0, 0, 0)),  # article
+        (0, 200, 5, 220, (0, 0, 0)),  # sparse recs (only 20px)
+        (0, 220, 100, 300, (0, 0, 0)),  # more content
+    ])
+    result = xtp.trim_recommendations(img, min_gap=30, min_density=50)
+    # The gap is only 20px which is < min_gap=30, so no trim should happen
     assert result.height == 300
 
 
 # ---------------------------------------------------------------------------
 # validate_output
 # ---------------------------------------------------------------------------
-
 
 def test_validate_valid_image():
     """Image with plenty of content."""
@@ -272,7 +251,6 @@ def test_validate_low_content():
 # ---------------------------------------------------------------------------
 # Integration-style: pixel analysis on a synthetic X layout
 # ---------------------------------------------------------------------------
-
 
 def test_full_x_layout_simulation():
     """Simulate a full X page: left sidebar, article, right panel, recommendations."""
@@ -308,13 +286,11 @@ def test_full_x_layout_simulation():
     content_right = xtp.find_content_horizontal_bounds(cropped)
     # The right panel is very sparse (5px wide) so the 10% threshold
     # may include it. What matters is we don't go to full width (1050).
-    assert content_right < 900, (
-        f"Should mostly exclude right panel, got {content_right}"
-    )
+    assert content_right < 900, f"Should mostly exclude right panel, got {content_right}"
 
     # Step 3: vertical trim
     cropped = cropped.crop((0, 0, content_right, h))
-    trimmed = xtp.trim_recommendations(cropped, text_density=100)
+    trimmed = xtp.trim_recommendations(cropped, min_gap=30, min_density=100)
     assert trimmed.height < h, "Should trim recommendations"
     assert trimmed.height > 2500, "Should keep article"
 
@@ -338,7 +314,7 @@ def test_x_layout_no_recommendations():
     assert content_right == w
 
     # Vertical: should not trim
-    trimmed = xtp.trim_recommendations(img)
+    trimmed = xtp.trim_recommendations(img, min_gap=30, min_density=100)
     assert trimmed.height == h
 
 
@@ -346,159 +322,8 @@ def test_x_layout_no_recommendations():
 # Run all tests
 # ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# scroll_to_load_all
-# ---------------------------------------------------------------------------
-
-
-def test_scroll_returns_count():
-    """scroll_to_load_all returns the number of scrolls performed."""
-    page = MagicMock()
-    page.evaluate = MagicMock(return_value=5)
-    page.wait_for_timeout = MagicMock()
-
-    result = xtp.scroll_to_load_all(page, verbose=False)
-    assert isinstance(result, int)
-    assert result >= 1
-
-
-def test_scroll_stable_stops_early():
-    """When article count stabilizes at 3 consecutive checks, scrolling stops."""
-    page = MagicMock()
-    page.wait_for_timeout = MagicMock()
-
-    # Return: 1, 2, 3, 3, 3, 3 — stabilizes at count=3
-    counts = [1, 2, 3, 3, 3, 3, 3, 3, 3, 3]
-    idx = [0]
-
-    def side_effect(_):
-        val = counts[idx[0] % len(counts)]
-        idx[0] += 1
-        return val
-
-    page.evaluate = MagicMock(side_effect=side_effect)
-
-    result = xtp.scroll_to_load_all(page, verbose=False)
-    # Should stop after seeing 3 same counts (3 + the initial diffs = ~5-6 scrolls)
-    assert result <= 10
-
-
-def test_scroll_increments_total():
-    """Each iteration increments the scroll counter."""
-    page = MagicMock()
-    page.evaluate = MagicMock(return_value=2)
-    page.wait_for_timeout = MagicMock()
-
-    result = xtp.scroll_to_load_all(page, verbose=False)
-    assert result >= 1
-
-
-# ---------------------------------------------------------------------------
-# CLI: --ct0 flag
-# ---------------------------------------------------------------------------
-
-
-def test_cli_accepts_ct0_flag():
-    """Argparse accepts --ct0 without error."""
-    import inspect
-
-    sig = inspect.signature(xtp.x_to_png)
-    params = list(sig.parameters.keys())
-    assert "ct0_token" in params, f"x_to_png should accept ct0_token, got: {params}"
-
-    sig2 = inspect.signature(xtp._x_to_png_single)
-    params2 = list(sig2.parameters.keys())
-    assert "ct0_token" in params2, (
-        f"_x_to_png_single should accept ct0_token, got: {params2}"
-    )
-
-
-def test_scroll_to_load_all_signature():
-    """scroll_to_load_all accepts verbose parameter."""
-    import inspect
-
-    sig = inspect.signature(xtp.scroll_to_load_all)
-    params = list(sig.parameters.keys())
-    assert "page" in params
-    assert "verbose" in params
-
-
-# ---------------------------------------------------------------------------
-# find_post_boundary_y: last-article-aware
-# ---------------------------------------------------------------------------
-
-
-def test_boundary_uses_last_article():
-    """find_post_boundary_y looks at the LAST article's next sibling, not the first."""
-    page = MagicMock()
-    page.evaluate = MagicMock(return_value=500)
-
-    result = xtp.find_post_boundary_y(page)
-    assert result == 500
-
-    # Verify the JS code references the last article
-    call_args = page.evaluate.call_args
-    js_code = call_args[0][0]
-    assert "articles.length - 1" in js_code or "articles[articles" in js_code, (
-        "Boundary detection should use the last article"
-    )
-
-
-def test_boundary_returns_positive():
-    """find_post_boundary_y returns a positive Y when boundary found."""
-    page = MagicMock()
-    page.evaluate = MagicMock(return_value=1200)
-    result = xtp.find_post_boundary_y(page)
-    assert result == 1200
-
-
-def test_boundary_returns_negative_when_no_match():
-    """find_post_boundary_y returns -1 when no boundary is found."""
-    page = MagicMock()
-    page.evaluate = MagicMock(return_value=-1)
-    result = xtp.find_post_boundary_y(page)
-    assert result == -1
-
-
-# ---------------------------------------------------------------------------
-# wait_for_content: lower threshold
-# ---------------------------------------------------------------------------
-
-
-def test_wait_returns_content_info():
-    """wait_for_content returns (content_len, elapsed)."""
-    page = MagicMock()
-    page.wait_for_timeout = MagicMock()
-
-    # Simulate content being found immediately
-    page.evaluate = MagicMock(return_value=15000)
-
-    content_len, elapsed = xtp.wait_for_content(page, timeout=10, verbose=False)
-    assert content_len > 0
-    assert elapsed >= 0
-
-
-def test_wait_handles_initial_skeleton():
-    """wait_for_content handles skeleton state (len == -1) then resolves."""
-    page = MagicMock()
-    page.wait_for_timeout = MagicMock()
-
-    # First call returns -1 (skeleton), second call returns real content
-    values = iter([-1, -1, -1, 20000])
-    page.evaluate = MagicMock(side_effect=lambda _: next(values))
-
-    content_len, elapsed = xtp.wait_for_content(page, timeout=60, verbose=False)
-    assert content_len == 20000
-
-
-# ---------------------------------------------------------------------------
-# Run all tests
-# ---------------------------------------------------------------------------
-
 if __name__ == "__main__":
-    test_funcs = [
-        v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)
-    ]
+    test_funcs = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     passed = 0
     failed = 0
     for fn in test_funcs:
