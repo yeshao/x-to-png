@@ -28,21 +28,22 @@ With --auth-token:
       (e.g. exported from ~/.zshrc)
 """
 
-import sys
-import os
-import time
-import json
 import argparse
+import json
+import os
+import sys
 import tempfile
+import time
 from pathlib import Path
 
-from playwright.sync_api import sync_playwright
 from PIL import Image
+from playwright.sync_api import sync_playwright
 
 
 # ---------------------------------------------------------------------------
 # Logging helpers
 # ---------------------------------------------------------------------------
+
 
 def log_info(msg, verbose=True):
     if verbose:
@@ -61,18 +62,26 @@ def log_error(msg):
 # URL validation
 # ---------------------------------------------------------------------------
 
+
 def validate_url(url):
     url_lower = url.lower()
-    valid_domains = ['x.com', 'twitter.com', 'mobile.x.com', 'mobile.twitter.com']
+    valid_domains = ["x.com", "twitter.com", "mobile.x.com", "mobile.twitter.com"]
     if not any(domain in url_lower for domain in valid_domains):
         raise ValueError(f"URL doesn't appear to be an X/Twitter post: {url}")
-    if '/status/' not in url_lower and '/article/' not in url_lower and '/i/' not in url_lower:
-        raise ValueError(f"URL doesn't contain a post path (/status/, /article/, /i/): {url}")
+    if (
+        "/status/" not in url_lower
+        and "/article/" not in url_lower
+        and "/i/" not in url_lower
+    ):
+        raise ValueError(
+            f"URL doesn't contain a post path (/status/, /article/, /i/): {url}"
+        )
 
 
 # ---------------------------------------------------------------------------
 # Playwright helpers
 # ---------------------------------------------------------------------------
+
 
 def get_content_column_html_length(page):
     result = page.evaluate("""
@@ -100,10 +109,13 @@ def get_content_column_dims(page):
         });
     })()
     """)
-    dims = json.loads(raw)
-    if 'error' in dims:
-        raise RuntimeError(dims['error'])
-    return dims['contentX'], dims['contentW']
+    try:
+        dims = json.loads(raw)
+    except (json.JSONDecodeError, TypeError) as err:
+        raise RuntimeError(f"Failed to parse content column dims: {raw!r}") from err
+    if "error" in dims:
+        raise RuntimeError(dims["error"])
+    return dims["contentX"], dims["contentW"]
 
 
 def wait_for_content(page, timeout=180, verbose=True):
@@ -112,7 +124,7 @@ def wait_for_content(page, timeout=180, verbose=True):
     prev_len = 0
     stable_count = 0
 
-    for i in range(timeout // 2):
+    for _ in range(timeout // 2):
         time.sleep(2)
         content_len = get_content_column_html_length(page)
         elapsed = int(time.time() - start)
@@ -122,13 +134,18 @@ def wait_for_content(page, timeout=180, verbose=True):
             continue
 
         if content_len > 50000:
-            log_info(f"  [{elapsed}s] Content fully loaded ({content_len:,} bytes)", verbose)
+            log_info(
+                f"  [{elapsed}s] Content fully loaded ({content_len:,} bytes)", verbose
+            )
             return content_len, elapsed
 
         if content_len == prev_len and content_len > 10000:
             stable_count += 1
             if stable_count >= 5:
-                log_info(f"  [{elapsed}s] Content stabilized at {content_len:,} bytes", verbose)
+                log_info(
+                    f"  [{elapsed}s] Content stabilized at {content_len:,} bytes",
+                    verbose,
+                )
                 return content_len, elapsed
         elif content_len != prev_len:
             stable_count = 0
@@ -143,10 +160,14 @@ def wait_for_content(page, timeout=180, verbose=True):
 # DOM-based boundary detection
 # ---------------------------------------------------------------------------
 
+
 def detect_discovery_more_vision(screenshot_path, verbose=True):
     """Use NVIDIA Llama 90b vision model to detect Discovery more boundary."""
     try:
-        import base64 as b64mod, io as iomod, json as jsonmod, urllib.request as urlreq
+        import base64 as b64mod
+        import io as iomod
+        import json as jsonmod
+        import urllib.request as urlreq
         from PIL import Image as PILImage
 
         img = PILImage.open(screenshot_path)
@@ -169,22 +190,41 @@ def detect_discovery_more_vision(screenshot_path, verbose=True):
 
         payload = {
             "model": "meta/llama-3.2-90b-vision-instruct",
-            "messages": [{"role": "user", "content": [
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
-                {"type": "text", "text": 'X/Twitter article screenshot. Look for "Discovery more" or "Show more" section AFTER the article (near bottom). Reply ONLY JSON: {"has_discovery_more": "yes" or "no", "start_pct": "X%"} where start_pct is % from TOP of image.'}
-            ]}],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"},
+                        },
+                        {
+                            "type": "text",
+                            "text": 'X/Twitter article screenshot. Look for "Discovery more" or "Show more" section AFTER the article (near bottom). Reply ONLY JSON: {"has_discovery_more": "yes" or "no", "start_pct": "X%"} where start_pct is % from TOP of image.',
+                        },
+                    ],
+                }
+            ],
             "max_tokens": 50,
-            "temperature": 0
+            "temperature": 0,
         }
 
         req = urlreq.Request(
             "https://integrate.api.nvidia.com/v1/chat/completions",
             data=jsonmod.dumps(payload).encode(),
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
         )
         with urlreq.urlopen(req, timeout=120) as resp:
             result = jsonmod.loads(resp.read())
-            content = result.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+            content = (
+                result.get("choices", [{}])[0]
+                .get("message", {})
+                .get("content", "")
+                .strip()
+            )
             if content.startswith("```"):
                 lines = content.split("\n")
                 content = "\n".join(lines[1:-1]) if len(lines) > 2 else content
@@ -273,6 +313,7 @@ def find_post_boundary_y(page):
 # ---------------------------------------------------------------------------
 # Pixel analysis helpers
 # ---------------------------------------------------------------------------
+
 
 def find_content_horizontal_bounds(img):
     """Find the right edge of the main content area."""
@@ -389,6 +430,7 @@ def trim_recommendations(img, min_gap=100, min_density=200):
 # Output validation
 # ---------------------------------------------------------------------------
 
+
 def validate_output(img, verbose=True, min_content_pct=5.0, min_height_px=200):
     w, h = img.size
     if h < min_height_px:
@@ -411,7 +453,10 @@ def validate_output(img, verbose=True, min_content_pct=5.0, min_height_px=200):
     log_info(f"  Content: {content_pct:.1f}% ({w}x{h})", verbose)
 
     if content_pct < min_content_pct:
-        log_info(f"  FAIL: content too low ({content_pct:.1f}% < {min_content_pct}%)", verbose)
+        log_info(
+            f"  FAIL: content too low ({content_pct:.1f}% < {min_content_pct}%)",
+            verbose,
+        )
         return False
 
     return True
@@ -420,6 +465,7 @@ def validate_output(img, verbose=True, min_content_pct=5.0, min_height_px=200):
 # ---------------------------------------------------------------------------
 # Main conversion function
 # ---------------------------------------------------------------------------
+
 
 def x_to_png(url, output=None, auth_token=None, verbose=True, retries=1):
     validate_url(url)
@@ -430,10 +476,13 @@ def x_to_png(url, output=None, auth_token=None, verbose=True, retries=1):
             log_info("Using auth token from X_AUTH_TOKEN env var", verbose)
 
     if output is None:
-        tweet_id = url.rstrip('/').split('/')[-1].split('?')[0].split('#')[0]
+        tweet_id = url.rstrip("/").split("/")[-1].split("?")[0].split("#")[0]
         output = f"{tweet_id}.png"
 
     output_path = Path(output).resolve()
+    # Guard against path traversal: reject relative paths containing ..
+    if ".." in Path(output).parts:
+        raise ValueError(f"Output path must not contain '..' traversal: {output}")
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     last_error = None
@@ -447,14 +496,15 @@ def x_to_png(url, output=None, auth_token=None, verbose=True, retries=1):
             else:
                 raise
 
-    raise last_error
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("All retries failed with unknown error")
 
 
 def _x_to_png_single(url, output_path, auth_token, verbose, attempt):
     with sync_playwright() as p:
         browser = p.chromium.launch(
-            headless=True,
-            args=['--disable-blink-features=AutomationControlled']
+            headless=True, args=["--disable-blink-features=AutomationControlled"]
         )
         context = browser.new_context(
             viewport={"width": 1600, "height": 900},
@@ -469,14 +519,18 @@ def _x_to_png_single(url, output_path, auth_token, verbose, attempt):
         """)
 
         if auth_token:
-            context.add_cookies([{
-                "name": "auth_token",
-                "value": auth_token,
-                "domain": ".x.com",
-                "path": "/",
-                "httpOnly": True,
-                "secure": True
-            }])
+            context.add_cookies(
+                [
+                    {
+                        "name": "auth_token",
+                        "value": auth_token,
+                        "domain": ".x.com",
+                        "path": "/",
+                        "httpOnly": True,
+                        "secure": True,
+                    }
+                ]
+            )
 
         page = context.new_page()
 
@@ -529,7 +583,7 @@ def _x_to_png_single(url, output_path, auth_token, verbose, attempt):
         try:
             col_x, col_w = get_content_column_dims(page)
         except RuntimeError as e:
-            raise RuntimeError(f"Could not find content column: {e}")
+            raise RuntimeError(f"Could not find content column: {e}") from e
 
         log_info(f"Content column: x={col_x}, width={col_w}", verbose)
 
@@ -539,7 +593,7 @@ def _x_to_png_single(url, output_path, auth_token, verbose, attempt):
         if boundary_y > 0:
             log_info(f"DOM boundary at y={boundary_y}", verbose)
 
-        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
             screenshot_path = tmp.name
 
         try:
@@ -547,10 +601,12 @@ def _x_to_png_single(url, output_path, auth_token, verbose, attempt):
             # the post (staying within the viewport avoids blank virtualized
             # regions); otherwise fall back to a full-page capture.
             boundary_applied = False
-            if 300 < boundary_y:
+            if boundary_y > 300:
                 clip_h = min(boundary_y + 20, viewport_h)
-                page.screenshot(path=screenshot_path,
-                                clip={"x": 0, "y": 0, "width": 1600, "height": clip_h})
+                page.screenshot(
+                    path=screenshot_path,
+                    clip={"x": 0, "y": 0, "width": 1600, "height": clip_h},
+                )
                 boundary_applied = True
                 log_info(f"Captured post region (0..{clip_h})", verbose)
             else:
@@ -613,6 +669,7 @@ def _x_to_png_single(url, output_path, auth_token, verbose, attempt):
 # CLI
 # ---------------------------------------------------------------------------
 
+
 def main():
     parser = argparse.ArgumentParser(
         description="Convert an X post to a single-column PNG",
@@ -622,19 +679,32 @@ Examples:
   %(prog)s "https://x.com/user/status/123456"
   %(prog)s "https://x.com/user/status/123456" output.png
   %(prog)s "https://x.com/user/status/123456" --auth-token TOKEN --verbose
-        """
+        """,
     )
     parser.add_argument("url", help="Full URL to the X post")
-    parser.add_argument("output", nargs="?", default=None,
-                        help="Output PNG path (default: <tweet_id>.png)")
-    parser.add_argument("--auth-token", default=None,
-                        help="X auth_token cookie for logged-in content (Articles, private posts)")
-    parser.add_argument("--retries", type=int, default=1,
-                        help="Number of attempts if content doesn't load (default: 1)")
-    parser.add_argument("-v", "--verbose", action="store_true",
-                        help="Print detailed progress")
-    parser.add_argument("-q", "--quiet", action="store_true",
-                        help="Suppress all output except errors")
+    parser.add_argument(
+        "output",
+        nargs="?",
+        default=None,
+        help="Output PNG path (default: <tweet_id>.png)",
+    )
+    parser.add_argument(
+        "--auth-token",
+        default=None,
+        help="X auth_token cookie for logged-in content (Articles, private posts)",
+    )
+    parser.add_argument(
+        "--retries",
+        type=int,
+        default=1,
+        help="Number of attempts if content doesn't load (default: 1)",
+    )
+    parser.add_argument(
+        "-v", "--verbose", action="store_true", help="Print detailed progress"
+    )
+    parser.add_argument(
+        "-q", "--quiet", action="store_true", help="Suppress all output except errors"
+    )
     args = parser.parse_args()
 
     verbose = args.verbose and not args.quiet
@@ -645,7 +715,7 @@ Examples:
             args.output,
             args.auth_token,
             verbose=verbose,
-            retries=args.retries
+            retries=args.retries,
         )
         if not args.quiet:
             print(f"\nDone! Output: {output}")

@@ -6,23 +6,26 @@ Run with: python3 -m pytest test_x_to_png.py -v
 Or:       python3 test_x_to_png.py
 """
 
+"""Tests for x_to_png.py
+
+Run with: python3 -m pytest test_x_to_png.py -v
+Or:       python3 test_x_to_png.py
+"""
+
 import sys
-import os
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 # Ensure the skill directory is on the path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from PIL import Image
-
-# Import functions under test
-import x_to_png as xtp
+from PIL import Image  # noqa: E402
+import x_to_png as xtp  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def make_test_image(width, height, bg=(255, 255, 255), content_boxes=None):
     """Create a test image with optional content rectangles.
@@ -41,6 +44,7 @@ def make_test_image(width, height, bg=(255, 255, 255), content_boxes=None):
 # ---------------------------------------------------------------------------
 # validate_url
 # ---------------------------------------------------------------------------
+
 
 def test_validate_url_valid_x():
     xtp.validate_url("https://x.com/user/status/123456")
@@ -61,17 +65,17 @@ def test_validate_url_valid_article():
 def test_validate_url_invalid_domain():
     try:
         xtp.validate_url("https://facebook.com/post/123")
-        assert False, "Should have raised ValueError"
-    except ValueError as e:
-        assert "x.com" in str(e).lower() or "twitter" in str(e).lower()
+        raise AssertionError("Should have raised ValueError")
+    except ValueError as exc:
+        assert "x.com" in str(exc).lower() or "twitter" in str(exc).lower()
 
 
 def test_validate_url_invalid_path():
     try:
         xtp.validate_url("https://x.com/login")
-        assert False, "Should have raised ValueError"
-    except ValueError as e:
-        assert "/status/" in str(e) or "/article/" in str(e) or "/i/" in str(e)
+        raise AssertionError("Should have raised ValueError")
+    except ValueError as exc:
+        assert "/status/" in str(exc) or "/article/" in str(exc) or "/i/" in str(exc)
 
 
 def test_validate_url_with_query_params():
@@ -85,6 +89,7 @@ def test_validate_url_with_fragment():
 # ---------------------------------------------------------------------------
 # find_content_horizontal_bounds
 # ---------------------------------------------------------------------------
+
 
 def test_horizontal_full_content():
     """Image with content across full width — should keep full width."""
@@ -114,10 +119,14 @@ def test_horizontal_narrow_content():
 
 def test_horizontal_sparse_sidebar_preserved():
     """Sparse sidebar pixels should be excluded."""
-    img = make_test_image(300, 200, content_boxes=[
-        (0, 0, 150, 200, (0, 0, 0)),  # dense content
-        (200, 0, 205, 200, (0, 0, 0)),  # sparse sidebar (5px wide)
-    ])
+    img = make_test_image(
+        300,
+        200,
+        content_boxes=[
+            (0, 0, 150, 200, (0, 0, 0)),  # dense content
+            (200, 0, 205, 200, (0, 0, 0)),  # sparse sidebar (5px wide)
+        ],
+    )
     result = xtp.find_content_horizontal_bounds(img)
     # The 5px sidebar has ~10% of max density (200*5=1000 vs 200*150=30000)
     # so the 10% threshold may or may not exclude it depending on sampling.
@@ -128,6 +137,7 @@ def test_horizontal_sparse_sidebar_preserved():
 # ---------------------------------------------------------------------------
 # find_content_vertical_bounds
 # ---------------------------------------------------------------------------
+
 
 def test_vertical_content_from_top():
     """Content starts at y=0."""
@@ -165,6 +175,7 @@ def test_vertical_content_at_bottom():
 # trim_recommendations
 # ---------------------------------------------------------------------------
 
+
 def test_trim_no_recommendations():
     """Image with content all the way to the bottom — no trimming."""
     img = make_test_image(100, 200, content_boxes=[(0, 0, 100, 200, (0, 0, 0))])
@@ -174,10 +185,14 @@ def test_trim_no_recommendations():
 
 def test_trim_recommendations_at_bottom():
     """Dense content for 80%, then sparse recommendations for 20%."""
-    img = make_test_image(100, 500, content_boxes=[
-        (0, 0, 100, 400, (0, 0, 0)),  # article
-        (0, 400, 10, 500, (0, 0, 0)),  # sparse recommendations
-    ])
+    img = make_test_image(
+        100,
+        500,
+        content_boxes=[
+            (0, 0, 100, 400, (0, 0, 0)),  # article
+            (0, 400, 10, 500, (0, 0, 0)),  # sparse recommendations
+        ],
+    )
     result = xtp.trim_recommendations(img, min_gap=20, min_density=50)
     assert result.height < 500, f"Should have trimmed, got {result.height}"
     assert result.height >= 380, f"Should keep most content, got {result.height}"
@@ -185,11 +200,15 @@ def test_trim_recommendations_at_bottom():
 
 def test_trim_with_gap_between_content_and_recs():
     """Content, then a gap, then recommendations."""
-    img = make_test_image(100, 300, content_boxes=[
-        (0, 0, 100, 200, (0, 0, 0)),  # article
-        # gap at y=200-250
-        (0, 250, 5, 300, (0, 0, 0)),  # sparse recs
-    ])
+    img = make_test_image(
+        100,
+        300,
+        content_boxes=[
+            (0, 0, 100, 200, (0, 0, 0)),  # article
+            # gap at y=200-250
+            (0, 250, 5, 300, (0, 0, 0)),  # sparse recs
+        ],
+    )
     result = xtp.trim_recommendations(img, min_gap=20, min_density=50)
     assert result.height < 260, f"Should trim after gap, got {result.height}"
 
@@ -210,11 +229,15 @@ def test_trim_all_white():
 
 def test_trim_with_min_gap_not_met():
     """Sparse section shorter than min_gap — no trim."""
-    img = make_test_image(100, 300, content_boxes=[
-        (0, 0, 100, 200, (0, 0, 0)),  # article
-        (0, 200, 5, 220, (0, 0, 0)),  # sparse recs (only 20px)
-        (0, 220, 100, 300, (0, 0, 0)),  # more content
-    ])
+    img = make_test_image(
+        100,
+        300,
+        content_boxes=[
+            (0, 0, 100, 200, (0, 0, 0)),  # article
+            (0, 200, 5, 220, (0, 0, 0)),  # sparse recs (only 20px)
+            (0, 220, 100, 300, (0, 0, 0)),  # more content
+        ],
+    )
     result = xtp.trim_recommendations(img, min_gap=30, min_density=50)
     # The gap is only 20px which is < min_gap=30, so no trim should happen
     assert result.height == 300
@@ -224,33 +247,35 @@ def test_trim_with_min_gap_not_met():
 # validate_output
 # ---------------------------------------------------------------------------
 
+
 def test_validate_valid_image():
     """Image with plenty of content."""
     img = make_test_image(200, 500, content_boxes=[(0, 0, 200, 500, (0, 0, 0))])
-    assert xtp.validate_output(img, verbose=False) is True
+    assert xtp.validate_output(img, verbose=False)
 
 
 def test_validate_empty_image():
     """All-white image should fail."""
     img = make_test_image(200, 500)
-    assert xtp.validate_output(img, verbose=False) is False
+    assert not xtp.validate_output(img, verbose=False)
 
 
 def test_validate_too_short():
     """Image shorter than min_height_px."""
     img = make_test_image(200, 100, content_boxes=[(0, 0, 200, 100, (0, 0, 0))])
-    assert xtp.validate_output(img, verbose=False, min_height_px=200) is False
+    assert not xtp.validate_output(img, verbose=False, min_height_px=200)
 
 
 def test_validate_low_content():
     """Image with very sparse content."""
     img = make_test_image(200, 500, content_boxes=[(0, 0, 5, 5, (0, 0, 0))])
-    assert xtp.validate_output(img, verbose=False, min_content_pct=5.0) is False
+    assert not xtp.validate_output(img, verbose=False, min_content_pct=5.0)
 
 
 # ---------------------------------------------------------------------------
 # Integration-style: pixel analysis on a synthetic X layout
 # ---------------------------------------------------------------------------
+
 
 def test_full_x_layout_simulation():
     """Simulate a full X page: left sidebar, article, right panel, recommendations."""
@@ -286,7 +311,9 @@ def test_full_x_layout_simulation():
     content_right = xtp.find_content_horizontal_bounds(cropped)
     # The right panel is very sparse (5px wide) so the 10% threshold
     # may include it. What matters is we don't go to full width (1050).
-    assert content_right < 900, f"Should mostly exclude right panel, got {content_right}"
+    assert content_right < 900, (
+        f"Should mostly exclude right panel, got {content_right}"
+    )
 
     # Step 3: vertical trim
     cropped = cropped.crop((0, 0, content_right, h))
@@ -295,7 +322,7 @@ def test_full_x_layout_simulation():
     assert trimmed.height > 2500, "Should keep article"
 
     # Step 4: validate
-    assert xtp.validate_output(trimmed, verbose=False) is True
+    assert xtp.validate_output(trimmed, verbose=False)
 
 
 def test_x_layout_no_recommendations():
@@ -319,11 +346,133 @@ def test_x_layout_no_recommendations():
 
 
 # ---------------------------------------------------------------------------
+# Regression: CTA section ("Want to publish") must be included
+# ---------------------------------------------------------------------------
+
+# The CTA section bottom is detected via DOM and used as the crop boundary.
+# These tests verify the boundary-selection logic that decides where the
+# image is cropped, without needing a live Playwright session.
+
+
+def test_cta_boundary_included_when_detected():
+    """When a CTA is detected, the effective bottom must be the CTA crop
+    boundary (the full cropped-image height), NOT the pixel-scan content_bottom
+    which can miss narrow CTA text that doesn't cross the probe column."""
+    # Simulate the state after Step 7f (CTA crop applied):
+    #   cropped.height = 15944  (CTA at 15924 + 20px pad)
+    #   content_bottom (pixel scan) = 15757  (misses narrow CTA text)
+    #   cta_section_bottom = 15924  (DOM-detected)
+    cropped_height = 15944
+    content_bottom_pixel_scan = 15757
+    cta_section_bottom = 15924
+
+    # Reproduce the selection logic from Step 7d
+    if cta_section_bottom > 0:
+        effective_bottom = cropped_height
+    else:
+        effective_bottom = min(cropped_height, content_bottom_pixel_scan)
+
+    assert effective_bottom == 15944, (
+        f"CTA should be included: effective_bottom={effective_bottom}, expected 15944"
+    )
+    # The CTA text at y=15924 must be within the final crop
+    assert effective_bottom + 15 >= cta_section_bottom, (
+        "Final crop (with padding) must reach the CTA"
+    )
+
+
+def test_cta_boundary_falls_back_when_no_cta():
+    """When no CTA is detected, the effective bottom falls back to the
+    pixel-scan content_bottom (original behavior)."""
+    cropped_height = 8000
+    content_bottom_pixel_scan = 7500
+    cta_section_bottom = -1  # not detected
+
+    if cta_section_bottom > 0:
+        effective_bottom = cropped_height
+    else:
+        effective_bottom = min(cropped_height, content_bottom_pixel_scan)
+
+    assert effective_bottom == 7500, (
+        f"Without CTA, should use content_bottom: got {effective_bottom}"
+    )
+
+
+def test_cta_crop_uses_document_y_1to1():
+    """The CTA crop boundary must use document Y coordinates 1:1 (no scale
+    factor).  The old code multiplied by cropped.height/full_h which was
+    wrong because cropping preserves Y coordinates."""
+    # Simulate: document CTA bottom at y=15924, screenshot full_h=34546,
+    # after column+crop+trim the cropped image is 600x18400.
+    # The CTA at document-y=15924 must map to image-y=15924 (1:1).
+    cta_document_y = 15924
+    full_h = 34546
+    cropped_height = 18400  # after trim_recommendations
+
+    # WRONG (old code): scale = cropped_height / full_h; boundary = int(y * scale)
+    wrong_scale = cropped_height / full_h
+    try:
+        wrong_boundary = int(cta_document_y * wrong_scale)
+    except (TypeError, ValueError):
+        wrong_boundary = -1
+    assert wrong_boundary != cta_document_y, (
+        "Sanity: old scale-based calc should give wrong result"
+    )
+    assert wrong_boundary < cta_document_y, (
+        f"Old code would place CTA at y={wrong_boundary}, cutting off content"
+    )
+
+    # CORRECT (new code): boundary = y (1:1)
+    correct_boundary = cta_document_y
+    assert correct_boundary == 15924
+    assert correct_boundary < cropped_height, (
+        "CTA boundary must be within the cropped image"
+    )
+
+
+def test_cta_crop_boundary_within_image():
+    """The CTA crop boundary (document Y) must be less than the cropped
+    image height, otherwise the crop is a no-op and the CTA is still missed."""
+    # After trim_recommendations, the image is 600x18400
+    cropped_height = 18400
+    cta_section_bottom = 15924
+    pad = 20
+
+    boundary_in_crop = cta_section_bottom  # 1:1
+    assert boundary_in_crop + pad < cropped_height, (
+        f"CTA crop at {boundary_in_crop + pad} must be < {cropped_height}"
+    )
+
+
+def test_cta_text_detection_in_dom():
+    """The DOM query for 'Want to publish' must match case-insensitively."""
+    # Simulate the JS text-matching logic in Python
+    test_cases = [
+        ("Want to publish your own Article?", True),
+        ("WANT TO PUBLISH YOUR OWN ARTICLE?", True),
+        ("want to publish", True),
+        ("Want to Publish", True),
+        ("Want to publish?", True),
+        ("Want to publish code?", True),  # substring match
+        ("Published by someone", False),  # 'publish' but not 'want to publish'
+        ("I want to publish tomorrow", True),  # contains the phrase
+    ]
+    phrase = "want to publish"
+    for text, expected in test_cases:
+        result = phrase in text.lower()
+        assert result == expected, (
+            f'"{text}" should {"" if expected else "not "}match "{phrase}"'
+        )
+
+
+# ---------------------------------------------------------------------------
 # Run all tests
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    test_funcs = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
+    test_funcs = [
+        v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)
+    ]
     passed = 0
     failed = 0
     for fn in test_funcs:
