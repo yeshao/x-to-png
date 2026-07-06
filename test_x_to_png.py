@@ -134,6 +134,28 @@ def test_horizontal_sparse_sidebar_preserved():
     assert result < 250, f"Should not include empty right half, got {result}"
 
 
+def test_horizontal_gutter_drops_right_panel():
+    """Center column + white gutter + dense right panel: crop at the gutter.
+
+    Mirrors a real X page where main.children[0] spans both the center
+    timeline and the right sidebar (trends / who-to-follow), separated by a
+    near-white vertical gutter. The right panel is dense enough to clear a
+    naive rightmost-dense-column scan, so the gutter must drive the crop.
+    """
+    img = make_test_image(
+        300,
+        200,
+        content_boxes=[
+            (0, 0, 150, 200, (0, 0, 0)),  # center column
+            # gutter at x=150-180
+            (180, 0, 250, 200, (0, 0, 0)),  # right panel (dense)
+        ],
+    )
+    result = xtp.find_content_horizontal_bounds(img)
+    assert result <= 180, f"Right panel must be cropped at the gutter, got {result}"
+    assert result >= 145, f"Center column must be kept, got {result}"
+
+
 # ---------------------------------------------------------------------------
 # find_content_vertical_bounds
 # ---------------------------------------------------------------------------
@@ -343,6 +365,60 @@ def test_x_layout_no_recommendations():
     # Vertical: should not trim
     trimmed = xtp.trim_recommendations(img, min_gap=30, min_density=100)
     assert trimmed.height == h
+
+
+# ---------------------------------------------------------------------------
+# Regression: replies inclusion (--replies N)
+# ---------------------------------------------------------------------------
+
+
+def test_replies_zero_crops_at_main_post():
+    """replies=0 keeps only the main post (index 0)."""
+    assert xtp.last_reply_index(0, 1) == 0
+    assert xtp.last_reply_index(0, 5) == 0
+
+
+def test_replies_n_keeps_main_plus_n():
+    """replies=N keeps the main post plus N replies (index N)."""
+    assert xtp.last_reply_index(5, 10) == 5
+    assert xtp.last_reply_index(3, 10) == 3
+    assert xtp.last_reply_index(1, 10) == 1
+
+
+def test_replies_clamped_to_article_count():
+    """When fewer replies exist than requested, clamp to the last article."""
+    assert xtp.last_reply_index(5, 3) == 2
+    assert xtp.last_reply_index(10, 1) == 0
+
+
+def test_replies_no_articles():
+    """No articles at all returns -1."""
+    assert xtp.last_reply_index(5, 0) == -1
+
+
+# ---------------------------------------------------------------------------
+# Regression: 'Show more' text matching for reply expansion
+# ---------------------------------------------------------------------------
+
+
+def test_show_more_text_detection():
+    """The 'Show more' affordance matcher must be case-insensitive and exact."""
+    test_cases = [
+        ("Show more", True),
+        ("show more", True),
+        ("SHOW MORE", True),
+        ("  Show more  ", True),  # whitespace trimmed
+        ("Show More Replies", False),  # different affordance
+        ("Show more.", False),  # punctuation changes it
+        ("Show", False),
+        ("", False),
+        ("Show more tweets", False),
+    ]
+    for text, expected in test_cases:
+        result = xtp.is_show_more_text(text)
+        assert result == expected, (
+            f'{text!r} should {"" if expected else "not "}match "show more"'
+        )
 
 
 # ---------------------------------------------------------------------------

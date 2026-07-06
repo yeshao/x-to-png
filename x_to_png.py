@@ -240,14 +240,115 @@ def detect_discovery_more_vision(screenshot_path, verbose=True):
         return -1
 
 
-def find_post_boundary_y(page):
+def last_reply_index(replies, article_count):
+    """Index of the last <article> to include in the screenshot.
+
+    replies=0 -> just the main post (index 0), matching the original
+    crop-at-end-of-post behavior. replies=N -> the main post plus up to
+    N reply articles (index N), clamped to the number of articles that
+    actually exist. Returns -1 when there are no articles.
     """
-    Use DOM queries to find the absolute page-Y position where the main post
-    ends and recommendations/replies begin. Must be called AFTER the final
+    if article_count <= 0:
+        return -1
+    return min(replies, article_count - 1)
+
+
+def scroll_to_load_replies(page, target_count, max_scrolls=60, verbose=True):
+    """Scroll down incrementally so X's virtualized list renders reply
+    articles into the DOM. Stops once at least ``target_count`` <article>
+    elements exist, or when scrolling stops producing new articles.
+    """
+    log_info(f"Loading replies (target {target_count} articles)...", verbose)
+    prev_count = 0
+    stable = 0
+    for i in range(max_scrolls):
+        count = page.evaluate("document.querySelectorAll('article').length")
+        if count >= target_count:
+            log_info(f"  [{i}] {count} articles loaded", verbose)
+            return count
+        if count == prev_count:
+            stable += 1
+            if stable >= 6:
+                log_info(f"  [{i}] article count stalled at {count}", verbose)
+                return count
+        else:
+            stable = 0
+            log_info(f"  [{i}] {count} articles", verbose)
+        prev_count = count
+        page.evaluate("window.scrollBy(0, 900)")
+        page.wait_for_timeout(500)
+    return prev_count
+
+
+def is_show_more_text(text):
+    """True when a leaf element's text is the X 'Show more' affordance that
+    expands truncated tweet/reply text in place. Case-insensitive, exact."""
+    return text.strip().lower() == "show more"
+
+
+def expand_show_more(page, last_idx, max_rounds=3, verbose=True):
+    """Click every 'Show more' button inside articles[0..last_idx] so
+    truncated reply text fully expands before the screenshot.
+
+    X renders long replies with a 'Show more' control (data-testid
+    'tweet-text-show-more') that expands the text inline. Without clicking,
+    the screenshot captures truncated text. Runs in rounds because one
+    expansion can reveal a nested affordance; stops when a round clicks
+    nothing. Returns the total number of clicks.
+    """
+    js = """
+    (function() {
+        var articles = document.querySelectorAll('article');
+        var lastIdx = Math.min(LASTIDX, articles.length - 1);
+        var clicked = [];
+        for (var i = 0; i <= lastIdx; i++) {
+            var all = articles[i].querySelectorAll('*');
+            for (var j = 0; j < all.length; j++) {
+                var el = all[j];
+                var t = (el.textContent || '').trim().toLowerCase();
+                if (t !== 'show more') continue;
+                if (clicked.indexOf(el) !== -1) continue;
+                // Prefer the actionable element (button/role/testid); fall
+                // back to a leaf span. Skip if an ancestor was already
+                // clicked so we don't double-dispatch parent + child.
+                var actionable = el.getAttribute('data-testid') === 'tweet-text-show-more'
+                    || el.getAttribute('role') === 'button'
+                    || el.tagName === 'BUTTON';
+                if (!actionable && el.children.length > 0) continue;
+                var dup = false;
+                for (var k = 0; k < clicked.length; k++) {
+                    if (clicked[k].contains(el)) { dup = true; break; }
+                }
+                if (dup) continue;
+                el.click();
+                clicked.push(el);
+            }
+        }
+        return clicked.length;
+    })()
+    """
+    total = 0
+    for r in range(max_rounds):
+        n = page.evaluate(js.replace("LASTIDX", str(last_idx)))
+        if n == 0:
+            break
+        total += n
+        log_info(f"  Expanded {n} 'Show more' (round {r + 1})", verbose)
+        page.wait_for_timeout(800)
+    return total
+
+
+def find_post_boundary_y(page, replies=0):
+    """
+    Use DOM queries to find the absolute page-Y position where the content
+    to keep ends and recommendations begin. Must be called AFTER the final
     viewport resize so coordinates match the full-page screenshot.
-    Returns Y position (page coordinates) or -1.
+
+    replies=0 crops at the end of the main post (articles[0]); replies=N
+    extends the boundary to include the first N reply articles
+    (articles[1..N]). Returns Y position (page coordinates) or -1.
     """
-    result = page.evaluate("""
+    js = """
     (function() {
         function pageBottom(el) {
             var r = el.getBoundingClientRect();
@@ -260,15 +361,17 @@ def find_post_boundary_y(page):
 
         // Strategy 1: The main post (tweet or full Article, including the
         // "Want to publish your own Article?" banner) is the first <article>
-        // element. Everything after it is replies/recommendations.
+        // element. With replies=0 everything after it is cropped; with
+        // replies=N the first N reply articles are kept as well.
         var articles = document.querySelectorAll('article');
         if (articles.length > 0) {
-            var bottom = pageBottom(articles[0]);
+            var lastIdx = Math.min(REPLIES, articles.length - 1);
+            var bottom = pageBottom(articles[lastIdx]);
             if (bottom > 300) {
-                // Cap at the top of the first reply in case of overlap
-                if (articles.length > 1) {
-                    var replyTop = pageTop(articles[1]);
-                    if (replyTop > bottom) bottom = Math.min(bottom + 20, replyTop);
+                // Cap at the top of the next article in case of overlap
+                if (articles.length > lastIdx + 1) {
+                    var nextTop = pageTop(articles[lastIdx + 1]);
+                    if (nextTop > bottom) bottom = Math.min(bottom + 20, nextTop);
                 }
                 return bottom;
             }
@@ -306,7 +409,8 @@ def find_post_boundary_y(page):
 
         return -1;
     })()
-    """)
+    """
+    result = page.evaluate(js.replace("REPLIES", str(replies)))
     return result
 
 
@@ -315,8 +419,16 @@ def find_post_boundary_y(page):
 # ---------------------------------------------------------------------------
 
 
-def find_content_horizontal_bounds(img):
-    """Find the right edge of the main content area."""
+def find_content_horizontal_bounds(img, min_block_width=40, merge_gap=15):
+    """Find the right edge of the main (center) content column.
+
+    The center timeline column and the right-side panel (trends / who-to-
+    follow) may both carry content, but the center column is the first WIDE
+    dense block reading left-to-right. We crop at its right edge, which
+    drops the right panel regardless of how dense it is. Blocks split by a
+    tiny internal dip (narrower than ``merge_gap``) are merged first so a
+    1-2px sparse seam inside the column can't truncate it.
+    """
     w, h = img.size
     step = max(1, h // 1000)
 
@@ -334,13 +446,40 @@ def find_content_horizontal_bounds(img):
         return w
 
     content_threshold = max_score * 0.10
-    content_right = w
+
+    # Collect maximal runs of columns at or above the content threshold.
+    runs = []
+    start = None
+    for cx in range(w):
+        if col_scores[cx] >= content_threshold:
+            if start is None:
+                start = cx
+        elif start is not None:
+            runs.append([start, cx])
+            start = None
+    if start is not None:
+        runs.append([start, w])
+
+    # Merge runs separated by a gap smaller than merge_gap so a thin internal
+    # seam inside the center column doesn't split it into two blocks.
+    merged = []
+    for r in runs:
+        if merged and r[0] - merged[-1][1] < merge_gap:
+            merged[-1][1] = r[1]
+        else:
+            merged.append(list(r))
+
+    # The center column is the first run wide enough to be real content.
+    for s, e in merged:
+        if e - s >= min_block_width:
+            return e
+
+    # No wide block found: fall back to the rightmost dense column.
     for cx in range(w - 1, -1, -1):
         if col_scores[cx] >= content_threshold:
-            content_right = cx + 1
-            break
+            return cx + 1
 
-    return content_right
+    return w
 
 
 def find_content_vertical_bounds(img, probe_x=None):
@@ -467,13 +606,22 @@ def validate_output(img, verbose=True, min_content_pct=5.0, min_height_px=200):
 # ---------------------------------------------------------------------------
 
 
-def x_to_png(url, output=None, auth_token=None, verbose=True, retries=1):
+def x_to_png(url, output=None, auth_token=None, verbose=True, retries=1, replies=0, ct0=None):
     validate_url(url)
 
     if not auth_token:
-        auth_token = os.environ.get("X_AUTH_TOKEN") or None
+        auth_token = (
+            os.environ.get("X_AUTH_TOKEN")
+            or os.environ.get("TWITTER_AUTH_TOKEN")
+            or None
+        )
         if auth_token:
-            log_info("Using auth token from X_AUTH_TOKEN env var", verbose)
+            log_info("Using auth token from X_AUTH_TOKEN/TWITTER_AUTH_TOKEN env var", verbose)
+
+    if not ct0:
+        ct0 = os.environ.get("X_CT0") or os.environ.get("TWITTER_CT0") or None
+        if ct0:
+            log_info("Using ct0 from X_CT0/TWITTER_CT0 env var", verbose)
 
     if output is None:
         tweet_id = url.rstrip("/").split("/")[-1].split("?")[0].split("#")[0]
@@ -488,7 +636,7 @@ def x_to_png(url, output=None, auth_token=None, verbose=True, retries=1):
     last_error = None
     for attempt in range(1, retries + 1):
         try:
-            return _x_to_png_single(url, output_path, auth_token, verbose, attempt)
+            return _x_to_png_single(url, output_path, auth_token, ct0, replies, verbose, attempt)
         except RuntimeError as e:
             last_error = e
             if attempt < retries:
@@ -501,7 +649,7 @@ def x_to_png(url, output=None, auth_token=None, verbose=True, retries=1):
     raise RuntimeError("All retries failed with unknown error")
 
 
-def _x_to_png_single(url, output_path, auth_token, verbose, attempt):
+def _x_to_png_single(url, output_path, auth_token, ct0, replies, verbose, attempt):
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True, args=["--disable-blink-features=AutomationControlled"]
@@ -518,19 +666,31 @@ def _x_to_png_single(url, output_path, auth_token, verbose, attempt):
             window.chrome = { runtime: {} };
         """)
 
+        cookies = []
         if auth_token:
-            context.add_cookies(
-                [
-                    {
-                        "name": "auth_token",
-                        "value": auth_token,
-                        "domain": ".x.com",
-                        "path": "/",
-                        "httpOnly": True,
-                        "secure": True,
-                    }
-                ]
+            cookies.append(
+                {
+                    "name": "auth_token",
+                    "value": auth_token,
+                    "domain": ".x.com",
+                    "path": "/",
+                    "httpOnly": True,
+                    "secure": True,
+                }
             )
+        if ct0:
+            cookies.append(
+                {
+                    "name": "ct0",
+                    "value": ct0,
+                    "domain": ".x.com",
+                    "path": "/",
+                    "httpOnly": False,
+                    "secure": True,
+                }
+            )
+        if cookies:
+            context.add_cookies(cookies)
 
         page = context.new_page()
 
@@ -552,12 +712,26 @@ def _x_to_png_single(url, output_path, auth_token, verbose, attempt):
             else:
                 log_warn("Content may not have fully loaded. Try again with --verbose.")
 
+        # Step 3b: When replies are requested, scroll the reply list into
+        # view so X's virtualized DOM renders the first N reply articles,
+        # then click 'Show more' on any truncated replies so their full
+        # text expands before the screenshot. Replies are authenticated
+        # content; without auth this is a no-op.
+        if replies > 0:
+            scroll_to_load_replies(page, replies + 1, verbose=verbose)
+            page.evaluate("window.scrollTo(0, 0)")
+            page.wait_for_timeout(1000)
+            clicks = expand_show_more(page, replies, verbose=verbose)
+            if clicks:
+                page.evaluate("window.scrollTo(0, 0)")
+                page.wait_for_timeout(1000)
+
         # Step 4: Find a preliminary post/replies boundary to know how far
         # we need to render, then scroll through that region step by step.
         # X virtualizes off-screen content, so without this scroll-through
         # (and a viewport tall enough to hold the whole post) large parts
         # of the article stay blank in screenshots.
-        boundary_pre = find_post_boundary_y(page)
+        boundary_pre = find_post_boundary_y(page, replies=replies)
         doc_h = page.evaluate("document.documentElement.scrollHeight")
         scroll_limit = boundary_pre + 1000 if boundary_pre > 0 else min(doc_h, 30000)
 
@@ -589,7 +763,7 @@ def _x_to_png_single(url, output_path, auth_token, verbose, attempt):
 
         # Step 4d: Re-measure the boundary in the final layout; its page
         # coordinates map 1:1 onto the screenshot
-        boundary_y = find_post_boundary_y(page)
+        boundary_y = find_post_boundary_y(page, replies=replies)
         if boundary_y > 0:
             log_info(f"DOM boundary at y={boundary_y}", verbose)
 
@@ -694,6 +868,17 @@ Examples:
         help="X auth_token cookie for logged-in content (Articles, private posts)",
     )
     parser.add_argument(
+        "--ct0",
+        default=None,
+        help="X ct0 CSRF cookie (recommended with --auth-token)",
+    )
+    parser.add_argument(
+        "--replies",
+        type=int,
+        default=0,
+        help="Include the first N reply comments in the screenshot (default: 0)",
+    )
+    parser.add_argument(
         "--retries",
         type=int,
         default=1,
@@ -716,6 +901,8 @@ Examples:
             args.auth_token,
             verbose=verbose,
             retries=args.retries,
+            replies=args.replies,
+            ct0=args.ct0,
         )
         if not args.quiet:
             print(f"\nDone! Output: {output}")
