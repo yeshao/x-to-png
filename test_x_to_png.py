@@ -397,30 +397,6 @@ def test_replies_no_articles():
 
 
 # ---------------------------------------------------------------------------
-# Regression: 'Show more' text matching for reply expansion
-# ---------------------------------------------------------------------------
-
-
-def test_show_more_text_detection():
-    """The 'Show more' affordance matcher must be case-insensitive and exact."""
-    test_cases = [
-        ("Show more", True),
-        ("show more", True),
-        ("SHOW MORE", True),
-        ("  Show more  ", True),  # whitespace trimmed
-        ("Show More Replies", False),  # different affordance
-        ("Show more.", False),  # punctuation changes it
-        ("Show", False),
-        ("", False),
-        ("Show more tweets", False),
-    ]
-    for text, expected in test_cases:
-        result = xtp.is_show_more_text(text)
-        assert result == expected, (
-            f'{text!r} should {"" if expected else "not "}match "show more"'
-        )
-
-
 # ---------------------------------------------------------------------------
 # Regression: CTA section ("Want to publish") must be included
 # ---------------------------------------------------------------------------

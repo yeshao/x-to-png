@@ -280,12 +280,6 @@ def scroll_to_load_replies(page, target_count, max_scrolls=60, verbose=True):
     return prev_count
 
 
-def is_show_more_text(text):
-    """True when a leaf element's text is the X 'Show more' affordance that
-    expands truncated tweet/reply text in place. Case-insensitive, exact."""
-    return text.strip().lower() == "show more"
-
-
 def expand_show_more(page, last_idx, max_rounds=3, verbose=True):
     """Click every 'Show more' button inside articles[0..last_idx] so
     truncated reply text fully expands before the screenshot.
@@ -765,9 +759,10 @@ def _x_to_png_single(url, output_path, auth_token, ct0, replies, verbose, attemp
         # all scrolling is done and the tall viewport holds the kept
         # articles. Earlier expansion is undone by X's re-render during the
         # Step 4 scroll-through, so this must run last, before measurement.
-        if replies > 0:
-            expand_show_more(page, replies, verbose=verbose)
-            page.wait_for_timeout(1000)
+        # Always expand the main post (articles[0]); when replies=0,
+        # expand_show_more internally clamps last_idx to 0.
+        expand_show_more(page, replies, verbose=verbose)
+        page.wait_for_timeout(1000)
 
         # Step 4c: Get content column dimensions (in the final layout)
         try:
