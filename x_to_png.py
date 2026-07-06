@@ -301,27 +301,39 @@ def expand_show_more(page, last_idx, max_rounds=3, verbose=True):
         var articles = document.querySelectorAll('article');
         var lastIdx = Math.min(LASTIDX, articles.length - 1);
         var clicked = [];
+        function isActionable(el) {
+            if (!el) return false;
+            if (el.tagName === 'BUTTON' || el.getAttribute('role') === 'button') return true;
+            var tid = el.getAttribute('data-testid');
+            return tid && tid.indexOf('show') !== -1;
+        }
+        function alreadyClicked(target) {
+            for (var k = 0; k < clicked.length; k++) {
+                if (clicked[k] === target || clicked[k].contains(target) || target.contains(clicked[k])) return true;
+            }
+            return false;
+        }
         for (var i = 0; i <= lastIdx; i++) {
             var all = articles[i].querySelectorAll('*');
             for (var j = 0; j < all.length; j++) {
                 var el = all[j];
                 var t = (el.textContent || '').trim().toLowerCase();
                 if (t !== 'show more') continue;
-                if (clicked.indexOf(el) !== -1) continue;
-                // Prefer the actionable element (button/role/testid); fall
-                // back to a leaf span. Skip if an ancestor was already
-                // clicked so we don't double-dispatch parent + child.
-                var actionable = el.getAttribute('data-testid') === 'tweet-text-show-more'
-                    || el.getAttribute('role') === 'button'
-                    || el.tagName === 'BUTTON';
-                if (!actionable && el.children.length > 0) continue;
-                var dup = false;
-                for (var k = 0; k < clicked.length; k++) {
-                    if (clicked[k].contains(el)) { dup = true; break; }
+                if (el.children.length > 0) continue;  // only match leaf labels
+                // The label is often a plain <span>; the click handler
+                // lives on a BUTTON/role=button ancestor. Walk up to it.
+                var target = el;
+                if (!isActionable(el)) {
+                    var anc = el.parentElement;
+                    for (var k = 0; k < 8 && anc; k++) {
+                        if (isActionable(anc)) { target = anc; break; }
+                        anc = anc.parentElement;
+                    }
                 }
-                if (dup) continue;
-                el.click();
-                clicked.push(el);
+                if (!isActionable(target)) continue;
+                if (alreadyClicked(target)) continue;
+                target.click();
+                clicked.push(target);
             }
         }
         return clicked.length;
@@ -713,18 +725,14 @@ def _x_to_png_single(url, output_path, auth_token, ct0, replies, verbose, attemp
                 log_warn("Content may not have fully loaded. Try again with --verbose.")
 
         # Step 3b: When replies are requested, scroll the reply list into
-        # view so X's virtualized DOM renders the first N reply articles,
-        # then click 'Show more' on any truncated replies so their full
-        # text expands before the screenshot. Replies are authenticated
-        # content; without auth this is a no-op.
+        # view so X's virtualized DOM renders the first N reply articles.
+        # Replies are authenticated content; without auth this is a no-op.
+        # (Show-more expansion happens after the Step 4b viewport resize,
+        # since the Step 4 scroll-through re-collapses expanded posts.)
         if replies > 0:
             scroll_to_load_replies(page, replies + 1, verbose=verbose)
             page.evaluate("window.scrollTo(0, 0)")
             page.wait_for_timeout(1000)
-            clicks = expand_show_more(page, replies, verbose=verbose)
-            if clicks:
-                page.evaluate("window.scrollTo(0, 0)")
-                page.wait_for_timeout(1000)
 
         # Step 4: Find a preliminary post/replies boundary to know how far
         # we need to render, then scroll through that region step by step.
@@ -752,6 +760,14 @@ def _x_to_png_single(url, output_path, auth_token, ct0, replies, verbose, attemp
             viewport_h = 16000
         page.set_viewport_size({"width": 1600, "height": viewport_h})
         page.wait_for_timeout(3000)
+
+        # Step 4b1: Expand 'Show more' on truncated posts/replies now that
+        # all scrolling is done and the tall viewport holds the kept
+        # articles. Earlier expansion is undone by X's re-render during the
+        # Step 4 scroll-through, so this must run last, before measurement.
+        if replies > 0:
+            expand_show_more(page, replies, verbose=verbose)
+            page.wait_for_timeout(1000)
 
         # Step 4c: Get content column dimensions (in the final layout)
         try:
