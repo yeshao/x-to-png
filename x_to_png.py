@@ -392,6 +392,50 @@ def expand_show_more(page, last_idx, max_rounds=3, verbose=True):
     return total
 
 
+def expand_show_more_replies(page, max_rounds=5, verbose=True):
+    """Click 'Show more replies' / 'Show additional replies' buttons
+    that appear between tweets in a conversation thread to load more
+    replies. These are different from the per-tweet text 'Show more'.
+
+    X shows these buttons when there are more replies to load between
+    the main tweet and the reply list. Without clicking, scrolling
+    alone may not load all replies. Runs in rounds because each click
+    can reveal another button. Returns the total number of clicks.
+    """
+    js = """
+    (function() {
+        var clicked = 0;
+        var buttons = document.querySelectorAll('[role="button"], button');
+        for (var i = 0; i < buttons.length; i++) {
+            var el = buttons[i];
+            var text = (el.textContent || '').trim().toLowerCase();
+            // Match "show more replies", "show additional replies",
+            // "show more" that is NOT inside an article (those are
+            // handled by expand_show_more)
+            if (text.indexOf('show') === -1) continue;
+            if (text.indexOf('more') === -1) continue;
+            // Skip if inside an article (those are text-expand buttons)
+            if (el.closest('article')) continue;
+            // Skip if it's a "Discover more" or "Show more" in the sidebar
+            var rect = el.getBoundingClientRect();
+            if (rect.width < 80 || rect.height < 20) continue;
+            el.click();
+            clicked++;
+        }
+        return clicked;
+    })()
+    """
+    total = 0
+    for r in range(max_rounds):
+        n = page.evaluate(js)
+        if n == 0:
+            break
+        total += n
+        log_info(f"  Clicked {n} 'Show more replies' (round {r + 1})", verbose)
+        page.wait_for_timeout(1500)
+    return total
+
+
 def find_post_boundary_y(page, replies=0):
     """
     Use DOM queries to find the absolute page-Y position where the content
@@ -663,7 +707,9 @@ def validate_output(img, verbose=True, min_content_pct=5.0, min_height_px=200):
 # ---------------------------------------------------------------------------
 
 
-def x_to_png(url, output=None, auth_token=None, verbose=True, retries=1, replies=0, ct0=None):
+def x_to_png(
+    url, output=None, auth_token=None, verbose=True, retries=1, replies=0, ct0=None
+):
     validate_url(url)
 
     if not auth_token:
@@ -673,7 +719,9 @@ def x_to_png(url, output=None, auth_token=None, verbose=True, retries=1, replies
             or None
         )
         if auth_token:
-            log_info("Using auth token from X_AUTH_TOKEN/TWITTER_AUTH_TOKEN env var", verbose)
+            log_info(
+                "Using auth token from X_AUTH_TOKEN/TWITTER_AUTH_TOKEN env var", verbose
+            )
 
     if not ct0:
         ct0 = os.environ.get("X_CT0") or os.environ.get("TWITTER_CT0") or None
@@ -693,7 +741,9 @@ def x_to_png(url, output=None, auth_token=None, verbose=True, retries=1, replies
     last_error = None
     for attempt in range(1, retries + 1):
         try:
-            return _x_to_png_single(url, output_path, auth_token, ct0, replies, verbose, attempt)
+            return _x_to_png_single(
+                url, output_path, auth_token, ct0, replies, verbose, attempt
+            )
         except RuntimeError as e:
             last_error = e
             if attempt < retries:
@@ -776,6 +826,8 @@ def _x_to_png_single(url, output_path, auth_token, ct0, replies, verbose, attemp
         # since the Step 4 scroll-through re-collapses expanded posts.)
         if replies > 0:
             scroll_to_load_replies(page, replies + 1, verbose=verbose)
+            # Click "Show more replies" buttons that appear between tweets
+            expand_show_more_replies(page, verbose=verbose)
             page.evaluate("window.scrollTo(0, 0)")
             page.wait_for_timeout(1000)
 
