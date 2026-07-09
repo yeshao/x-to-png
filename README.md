@@ -4,11 +4,13 @@ Convert X/Twitter posts (tweets, articles, threads) into single-column PNG image
 
 ## Features
 
-- Captures the full tweet/thread content including all replies
+- Captures the full tweet/thread content including OP's own replies
 - Crops out sidebars, recommendations, and "Discovery more" sections
 - Supports authenticated sessions for viewing replies (requires X cookies)
 - Handles lazy-loaded content via incremental scrolling
 - Vision-model assisted boundary detection (optional, via NVIDIA API)
+- Auto-loads auth tokens from `~/.zshrc` (no need to pass CLI flags)
+- Waits for graphs/charts to fully render before capturing
 
 ## Requirements
 
@@ -31,10 +33,28 @@ python3 x_to_png.py "https://x.com/user/status/123456" output.png
 python3 x_to_png.py "https://x.com/user/status/123456" \
     --auth-token TOKEN --ct0 CT0
 
+# Include OP's own replies (thread continuation)
+python3 x_to_png.py "https://x.com/user/status/123456" --replies 6
+
+# Include ALL of the OP's own replies
+python3 x_to_png.py "https://x.com/user/status/123456" --replies all
+
 # Verbose output
 python3 x_to_png.py "https://x.com/user/status/123456" \
     --auth-token TOKEN --ct0 CT0 --verbose
 ```
+
+### Auth Token Setup
+
+The script automatically loads `X_AUTH_TOKEN` and `X_CT0` from `~/.zshrc`.
+Add these exports to your `~/.zshrc`:
+
+```bash
+export X_AUTH_TOKEN="your_auth_token"
+export X_CT0="your_ct0_token"
+```
+
+Then run `source ~/.zshrc`. No need to pass `--auth-token` or `--ct0` flags.
 
 ### Getting Auth Cookies
 
@@ -50,7 +70,8 @@ python3 x_to_png.py "https://x.com/user/status/123456" \
 | `output`        | Output PNG path (default: `<tweet_id>.png`)             |
 | `--auth-token`  | X auth_token cookie for logged-in content               |
 | `--ct0`         | X ct0 CSRF cookie (recommended with --auth-token)       |
-| `--replies N`   | Include the first N reply comments (default: 0)         |
+| `--replies N`   | Include N of the OP's own replies (default: 0)          |
+| `--replies all` | Include ALL of the OP's own replies                     |
 | `--retries N`   | Number of attempts if content doesn't load (default: 1) |
 | `-v, --verbose` | Print detailed progress                                  |
 | `-q, --quiet`   | Suppress all output except errors                       |
