@@ -303,13 +303,40 @@ def last_reply_index(replies, article_count):
 
 def scroll_to_load_replies(page, target_count, max_scrolls=60, verbose=True):
     """Scroll down incrementally so X's virtualized list renders reply
-    articles into the DOM. Stops once at least ``target_count`` <article>
-    elements exist, or when scrolling stops producing new articles.
+    articles into the DOM, clicking 'Show more replies' buttons as they
+    appear. Stops once at least ``target_count`` <article> elements
+    exist, or when scrolling stops producing new articles.
     """
     log_info(f"Loading replies (target {target_count} articles)...", verbose)
     prev_count = 0
     stable = 0
+    show_more_js = """
+    (function() {
+        var clicked = 0;
+        var buttons = document.querySelectorAll('button, [role="button"]');
+        for (var i = 0; i < buttons.length; i++) {
+            var el = buttons[i];
+            var text = (el.textContent || '').trim().toLowerCase();
+            if (text.indexOf('show') === -1) continue;
+            if (text.indexOf('more') === -1) continue;
+            if (el.closest('article')) continue;
+            var rect = el.getBoundingClientRect();
+            if (rect.width < 60 || rect.height < 20) continue;
+            if (rect.bottom < 0 || rect.top > window.innerHeight) continue;
+            // Skip right-panel buttons (trends/who-to-follow)
+            if (rect.x > 600) continue;
+            el.click();
+            clicked++;
+        }
+        return clicked;
+    })()
+    """
     for i in range(max_scrolls):
+        # Click any visible 'Show more replies' before scrolling
+        n_show = page.evaluate(show_more_js)
+        if n_show > 0:
+            log_info(f"  [{i}] clicked {n_show} 'Show more replies'", verbose)
+            page.wait_for_timeout(1500)
         count = page.evaluate("document.querySelectorAll('article').length")
         if count >= target_count:
             log_info(f"  [{i}] {count} articles loaded", verbose)
@@ -328,68 +355,8 @@ def scroll_to_load_replies(page, target_count, max_scrolls=60, verbose=True):
     return prev_count
 
 
-def expand_show_more(page, last_idx, max_rounds=3, verbose=True):
-    """Click every 'Show more' button inside articles[0..last_idx] so
-    truncated reply text fully expands before the screenshot.
 
-    X renders long replies with a 'Show more' control (data-testid
-    'tweet-text-show-more') that expands the text inline. Without clicking,
-    the screenshot captures truncated text. Runs in rounds because one
-    expansion can reveal a nested affordance; stops when a round clicks
-    nothing. Returns the total number of clicks.
-    """
-    js = """
-    (function() {
-        var articles = document.querySelectorAll('article');
-        var lastIdx = Math.min(LASTIDX, articles.length - 1);
-        var clicked = [];
-        function isActionable(el) {
-            if (!el) return false;
-            if (el.tagName === 'BUTTON' || el.getAttribute('role') === 'button') return true;
-            var tid = el.getAttribute('data-testid');
-            return tid && tid.indexOf('show') !== -1;
-        }
-        function alreadyClicked(target) {
-            for (var k = 0; k < clicked.length; k++) {
-                if (clicked[k] === target || clicked[k].contains(target) || target.contains(clicked[k])) return true;
-            }
-            return false;
-        }
-        for (var i = 0; i <= lastIdx; i++) {
-            var all = articles[i].querySelectorAll('*');
-            for (var j = 0; j < all.length; j++) {
-                var el = all[j];
-                var t = (el.textContent || '').trim().toLowerCase();
-                if (t !== 'show more') continue;
-                if (el.children.length > 0) continue;  // only match leaf labels
-                // The label is often a plain <span>; the click handler
-                // lives on a BUTTON/role=button ancestor. Walk up to it.
-                var target = el;
-                if (!isActionable(el)) {
-                    var anc = el.parentElement;
-                    for (var k = 0; k < 8 && anc; k++) {
-                        if (isActionable(anc)) { target = anc; break; }
-                        anc = anc.parentElement;
-                    }
-                }
-                if (!isActionable(target)) continue;
-                if (alreadyClicked(target)) continue;
-                target.click();
-                clicked.push(target);
-            }
-        }
-        return clicked.length;
-    })()
-    """
-    total = 0
-    for r in range(max_rounds):
-        n = page.evaluate(js.replace("LASTIDX", str(last_idx)))
-        if n == 0:
-            break
-        total += n
-        log_info(f"  Expanded {n} 'Show more' (round {r + 1})", verbose)
-        page.wait_for_timeout(800)
-    return total
+
 
 
 def find_post_boundary_y(page, replies=0):
@@ -801,9 +768,53 @@ def _x_to_png_single(url, output_path, auth_token, ct0, replies, verbose, attemp
         scroll_limit = boundary_pre + 1000 if boundary_pre > 0 else min(doc_h, 30000)
 
         log_info("Scrolling through content to force rendering...", verbose)
+        # JS to click 'Show more' in articles while they're in view
+        show_more_js = """
+        (function() {
+            var articles = document.querySelectorAll('article');
+            var clicked = [];
+            function isActionable(el) {
+                if (!el) return false;
+                if (el.tagName === 'BUTTON' || el.getAttribute('role') === 'button') return true;
+                var tid = el.getAttribute('data-testid');
+                return tid && tid.indexOf('show') !== -1;
+            }
+            for (var i = 0; i < articles.length; i++) {
+                var all = articles[i].querySelectorAll('*');
+                for (var j = 0; j < all.length; j++) {
+                    var el = all[j];
+                    if (el.children.length > 0) continue;
+                    var t = (el.textContent || '').trim().toLowerCase();
+                    if (t !== 'show more') continue;
+                    var target = el;
+                    if (!isActionable(el)) {
+                        var anc = el.parentElement;
+                        for (var k = 0; k < 8 && anc; k++) {
+                            if (isActionable(anc)) { target = anc; break; }
+                            anc = anc.parentElement;
+                        }
+                    }
+                    if (!isActionable(target)) continue;
+                    var already = false;
+                    for (var m = 0; m < clicked.length; m++) {
+                        if (clicked[m] === target) { already = true; break; }
+                    }
+                    if (already) continue;
+                    target.click();
+                    clicked.push(target);
+                }
+            }
+            return clicked.length;
+        })()
+        """
         y = 0
         while y < scroll_limit:
             page.evaluate(f"window.scrollTo(0, {y})")
+            # Click 'Show more' buttons that are now in view
+            n_sm = page.evaluate(show_more_js)
+            if n_sm > 0:
+                log_info(f"  Expanded {n_sm} 'Show more' at y={y}", verbose)
+                page.wait_for_timeout(500)
             page.wait_for_timeout(300)
             y += 800
         page.evaluate("window.scrollTo(0, 0)")
@@ -818,14 +829,8 @@ def _x_to_png_single(url, output_path, auth_token, ct0, replies, verbose, attemp
         page.set_viewport_size({"width": 1600, "height": viewport_h})
         page.wait_for_timeout(3000)
 
-        # Step 4b1: Expand 'Show more' on truncated posts/replies now that
-        # all scrolling is done and the tall viewport holds the kept
-        # articles. Earlier expansion is undone by X's re-render during the
-        # Step 4 scroll-through, so this must run last, before measurement.
-        # Always expand the main post (articles[0]); when replies=0,
-        # expand_show_more internally clamps last_idx to 0.
-        expand_show_more(page, replies, verbose=verbose)
-        page.wait_for_timeout(1000)
+        # 'Show more' buttons already clicked during Step 4 scroll-through
+        # (virtualized articles are reliably in DOM during scrolling)
 
         # Step 4c: Get content column dimensions (in the final layout)
         try:
