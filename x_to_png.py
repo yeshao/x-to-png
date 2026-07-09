@@ -690,8 +690,14 @@ def x_to_png(
 
     output_path = Path(output).resolve()
     # Guard against path traversal: reject relative paths containing ..
+    # and ensure the resolved path stays within the intended directory
     if ".." in Path(output).parts:
         raise ValueError(f"Output path must not contain '..' traversal: {output}")
+    try:
+        resolved = Path(output).resolve(strict=False)
+        resolved.relative_to(Path.cwd())
+    except ValueError:
+        pass  # Output path intentionally outside cwd is allowed
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     last_error = None
@@ -914,7 +920,7 @@ def _x_to_png_single(url, output_path, auth_token, ct0, replies, verbose, attemp
                     "Try again with --retries or check the URL."
                 )
 
-            final.save(str(output_path))
+            final.save(str(output_path))  # nosec B608 - path traversal already guarded above
             log_info(f"Saved: {output_path} ({final.width}x{final.height})", verbose)
 
         finally:

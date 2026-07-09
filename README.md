@@ -64,17 +64,17 @@ Then run `source ~/.zshrc`. No need to pass `--auth-token` or `--ct0` flags.
 
 ## Options
 
-| Flag            | Description                                             |
-| --------------- | ------------------------------------------------------- |
-| `url`           | Full URL to the X post (required)                       |
-| `output`        | Output PNG path (default: `<tweet_id>.png`)             |
-| `--auth-token`  | X auth_token cookie for logged-in content               |
-| `--ct0`         | X ct0 CSRF cookie (recommended with --auth-token)       |
-| `--replies N`   | Include N of the OP's own replies (default: 0)          |
-| `--replies all` | Include ALL of the OP's own replies                     |
-| `--retries N`   | Number of attempts if content doesn't load (default: 1) |
-| `-v, --verbose` | Print detailed progress                                  |
-| `-q, --quiet`   | Suppress all output except errors                       |
+| Flag             | Description                                               |
+| ---------------- | --------------------------------------------------------- |
+| `url`            | Full URL to the X post (required)                         |
+| `output`         | Output PNG path (default: `<tweet_id>.png`)               |
+| `--auth-token`   | X auth_token cookie for logged-in content                 |
+| `--ct0`          | X ct0 CSRF cookie (recommended with --auth-token)        |
+| `--replies N`    | Include N of the OP's own replies (default: 0)           |
+| `--replies all`  | Include ALL of the OP's own replies                      |
+| `--retries N`    | Number of attempts if content doesn't load (default: 1)  |
+| `-v, --verbose`  | Print detailed progress                                   |
+| `-q, --quiet`    | Suppress all output except errors                        |
 
 ## How It Works
 
