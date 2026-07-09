@@ -50,6 +50,7 @@ python3 x_to_png.py "https://x.com/user/status/123456" \
 | `output`        | Output PNG path (default: `<tweet_id>.png`)             |
 | `--auth-token`  | X auth_token cookie for logged-in content               |
 | `--ct0`         | X ct0 CSRF cookie (recommended with --auth-token)       |
+| `--replies N`   | Include the first N reply comments (default: 0)         |
 | `--retries N`   | Number of attempts if content doesn't load (default: 1) |
 | `-v, --verbose` | Print detailed progress                                  |
 | `-q, --quiet`   | Suppress all output except errors                       |
