@@ -5,28 +5,29 @@ X/Twitter Post to PNG Converter
 Converts an X post (tweet, article, thread) into a single-column PNG image.
 
 Usage:
-    python3 x_to_png.py <url> [output_path] [--auth-token TOKEN] [--verbose] [--quiet]
+    python3 x_to_png.py <url> [output_path] [--auth-token TOKEN] [--ct0 CT0] [--verbose] [--quiet]
 
 Examples:
     python3 x_to_png.py "https://x.com/user/status/123456"
     python3 x_to_png.py "https://x.com/user/status/123456" my_screenshot.png
-    python3 x_to_png.py "https://x.com/user/status/123456" --auth-token abc123 --verbose
+    python3 x_to_png.py "https://x.com/user/status/123456" --auth-token abc123 --ct0 xyz789 --verbose
 
 Requirements:
     pip install playwright pillow
     playwright install chromium
 
-Without --auth-token:
-    - Works for public regular tweets (no login needed)
-    - X Articles / long-form posts require login (use --auth-token)
+Auth:
+    The script loads X_AUTH_TOKEN and X_CT0 from ~/.zshrc automatically.
+    You can also pass them via CLI flags or environment variables.
+    Auth is required for X Articles, private posts, and full reply threads.
 
-With --auth-token:
-    - Get your auth_token from browser dev tools -> Cookies -> x.com -> auth_token
-    - Visit x.com homepage first in the browser to get a fresh ct0 CSRF cookie
-    - Then the script can access full Articles and logged-in content
-    - If --auth-token is not given, the X_AUTH_TOKEN env var is used
-      (e.g. exported from ~/.zshrc)
+    To set up, add to ~/.zshrc:
+        export X_AUTH_TOKEN="your_auth_token"
+        export X_CT0="your_ct0_token"
+    Then run: source ~/.zshrc
 """
+
+from pathlib import Path
 
 import argparse
 import json
@@ -34,10 +35,48 @@ import os
 import sys
 import tempfile
 import time
-from pathlib import Path
 
 from PIL import Image
 from playwright.sync_api import sync_playwright
+
+
+# ---------------------------------------------------------------------------
+# Auth token loading
+# ---------------------------------------------------------------------------
+
+
+def _parse_zshrc_env(filepath):
+    """Parse export KEY="VALUE" or export KEY='VALUE' lines from a shell rc file."""
+    env_vars = {}
+    if not os.path.isfile(filepath):
+        return env_vars
+    try:
+        with open(filepath) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("export "):
+                    decl = line[len("export ") :]
+                    if "=" in decl:
+                        key, _, raw = decl.partition("=")
+                        val = raw.strip().strip('"').strip("'")
+                        env_vars[key] = val
+    except (OSError, UnicodeDecodeError):
+        pass
+    return env_vars
+
+
+def load_x_auth_from_zshrc():
+    """Return (auth_token, ct0) from ~/.zshrc exports, filling env vars as side effect."""
+    zshrc_path = os.path.expanduser("~/.zshrc")
+    parsed = _parse_zshrc_env(zshrc_path)
+    auth_token = parsed.get("X_AUTH_TOKEN", "")
+    ct0 = parsed.get("X_CT0", "")
+    # Also propagate to os.environ so child processes and future calls see them
+    if auth_token and not os.environ.get("X_AUTH_TOKEN"):
+        os.environ["X_AUTH_TOKEN"] = auth_token
+    if ct0 and not os.environ.get("X_CT0"):
+        os.environ["X_CT0"] = ct0
+    return auth_token or None, ct0 or None
 
 
 # ---------------------------------------------------------------------------
@@ -127,7 +166,10 @@ def wait_for_content(page, timeout=180, verbose=True):
     for _ in range(timeout // 2):
         time.sleep(2)
         content_len = get_content_column_html_length(page)
-        elapsed = int(time.time() - start)
+        try:
+            elapsed = int(time.time() - start)
+        except (OSError, OverflowError):
+            elapsed = 0
 
         if content_len == -1:
             log_info(f"  [{elapsed}s] Waiting for page structure...", verbose)
@@ -153,7 +195,10 @@ def wait_for_content(page, timeout=180, verbose=True):
         log_info(f"  [{elapsed}s] html={content_len:,}", verbose)
 
     content_len = get_content_column_html_length(page)
-    return content_len, int(time.time() - start)
+    try:
+        return content_len, int(time.time() - start)
+    except (OSError, OverflowError):
+        return content_len, 0
 
 
 # ---------------------------------------------------------------------------
@@ -169,7 +214,10 @@ def detect_discovery_more_vision(screenshot_path, verbose=True):
         import json as jsonmod
         import urllib.request as urlreq
         from PIL import Image as PILImage
+    except ImportError:
+        return -1
 
+    try:
         img = PILImage.open(screenshot_path)
         img_resized = img.resize((400, int(400 * img.height / img.width)))
         buf = iomod.BytesIO()
@@ -404,7 +452,10 @@ def trim_recommendations(img, min_gap=100, min_density=200):
         return img
 
     # Find the largest gap in the lower 60% of the image
-    lower_threshold = int(h * 0.4)
+    try:
+        lower_threshold = int(h * 0.4)
+    except (OverflowError, ValueError):
+        lower_threshold = 0
     best_gap = None
     best_gap_size = 0
     for g_start, g_end, g_size in gaps:
@@ -588,10 +639,26 @@ def _x_to_png_single(url, output_path, auth_token, verbose, attempt):
         log_info(f"Content column: x={col_x}, width={col_w}", verbose)
 
         # Step 4d: Re-measure the boundary in the final layout; its page
-        # coordinates map 1:1 onto the screenshot
+        # coordinates map 1:1 onto the screenshot.  The preliminary
+        # boundary (measured in the 900px scroll viewport) can be short of
+        # the true value after the page reflows in the tall viewport — if
+        # so, we must resize and re-measure or the screenshot clip will be
+        # truncated.
         boundary_y = find_post_boundary_y(page)
         if boundary_y > 0:
             log_info(f"DOM boundary at y={boundary_y}", verbose)
+        if boundary_y > viewport_h:
+            log_info(
+                f"Boundary exceeds viewport ({boundary_y} > {viewport_h}); "
+                f"resizing viewport and re-measuring...",
+                verbose,
+            )
+            viewport_h = min(boundary_y + 500, 30000)
+            page.set_viewport_size({"width": 1600, "height": viewport_h})
+            page.wait_for_timeout(3000)
+            boundary_y = find_post_boundary_y(page)
+            if boundary_y > 0:
+                log_info(f"Re-measured DOM boundary at y={boundary_y}", verbose)
 
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
             screenshot_path = tmp.name
