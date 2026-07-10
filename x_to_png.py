@@ -37,7 +37,6 @@ import tempfile
 import time
 
 from PIL import Image
-from playwright.sync_api import sync_playwright
 
 
 # ---------------------------------------------------------------------------
@@ -686,6 +685,7 @@ def x_to_png(
 
 
 def _x_to_png_single(url, output_path, auth_token, ct0, replies, verbose, attempt):
+    from playwright.sync_api import sync_playwright  # lazy: only the screenshot engine needs it
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True, args=["--disable-blink-features=AutomationControlled"]
@@ -940,6 +940,14 @@ def _x_to_png_single(url, output_path, auth_token, ct0, replies, verbose, attemp
 
 
 def main():
+    # Fast offline card renderer (syndication API, no browser). Handled before
+    # the Playwright argparse so --card works even without playwright installed.
+    argv = sys.argv[1:]
+    if "--card" in argv:
+        import card_renderer
+        card_renderer.main([a for a in argv if a != "--card"])
+        return
+
     parser = argparse.ArgumentParser(
         description="Convert an X post to a single-column PNG",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -951,6 +959,12 @@ Examples:
         """,
     )
     parser.add_argument("url", help="Full URL to the X post")
+    parser.add_argument(
+        "--card",
+        action="store_true",
+        help="Use the fast offline card renderer (syndication API, no browser) "
+        "instead of screenshotting a single public tweet",
+    )
     parser.add_argument(
         "output",
         nargs="?",

@@ -1,0 +1,29 @@
+{
+  "id_str": "1445078208190291978",
+  "text": "New blog post about wrapping bugs https://t.co/abc123 (with pics) https://t.co/media99",
+  "created_at": "2025-12-27T18:30:00.000Z",
+  "entities": {
+    "urls": [
+      {
+        "url": "https://t.co/abc123",
+        "expanded_url": "https://example.com/blog/wrapping-bugs-and-how-to-fix-them",
+        "display_url": "example.com/blog/wrapping-b…",
+        "indices": [34, 53]
+      }
+    ],
+    "media": [
+      {
+        "url": "https://t.co/media99",
+        "display_url": "pic.twitter.com/media99",
+        "indices": [65, 85]
+      }
+    ]
+  },
+  "user": {
+    "name": "Ada Lovelace",
+    "screen_name": "ada",
+    "profile_image_url_https": "https://pbs.twimg.com/profile_images/1/ada_normal.jpg",
+    "is_blue_verified": false,
+    "verified": false
+  }
+}

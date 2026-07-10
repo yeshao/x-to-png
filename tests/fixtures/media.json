@@ -1,0 +1,21 @@
+{
+  "id_str": "1445078208190291979",
+  "text": "photos from the trip https://t.co/pic1",
+  "created_at": "2025-12-27T18:30:00.000Z",
+  "entities": {
+    "media": [
+      {"url": "https://t.co/pic1", "display_url": "pic.twitter.com/pic1"}
+    ]
+  },
+  "mediaDetails": [
+    {"type": "photo", "media_url_https": "https://pbs.twimg.com/media/aaa.jpg"},
+    {"type": "photo", "media_url_https": "https://pbs.twimg.com/media/bbb.jpg"}
+  ],
+  "user": {
+    "name": "Ada Lovelace",
+    "screen_name": "ada",
+    "profile_image_url_https": "",
+    "is_blue_verified": false,
+    "verified": false
+  }
+}

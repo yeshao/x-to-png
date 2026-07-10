@@ -1,0 +1,12 @@
+{
+  "id_str": "1445078208190291973",
+  "text": "Hello world, this is a normal tweet with some text in it.",
+  "created_at": "2025-12-27T18:30:00.000Z",
+  "user": {
+    "name": "Ada Lovelace",
+    "screen_name": "ada",
+    "profile_image_url_https": "https://pbs.twimg.com/profile_images/1/ada_normal.jpg",
+    "is_blue_verified": false,
+    "verified": false
+  }
+}

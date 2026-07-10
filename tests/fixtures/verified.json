@@ -1,0 +1,12 @@
+{
+  "id_str": "1445078208190291974",
+  "text": "A tweet from a verified account.",
+  "created_at": "2025-12-27T18:30:00.000Z",
+  "user": {
+    "name": "Grace Hopper",
+    "screen_name": "amazinggrace",
+    "profile_image_url_https": "https://pbs.twimg.com/profile_images/2/grace_normal.jpg",
+    "is_blue_verified": true,
+    "verified": false
+  }
+}

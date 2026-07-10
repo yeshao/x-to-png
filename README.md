@@ -1,124 +1,114 @@
 # x-to-png
 
-Convert X/Twitter posts (tweets, articles, threads) into single-column PNG images.
+Convert X/Twitter posts into PNG images, with two rendering engines:
+
+- **Browser mode (default)** — drives headless Chromium (Playwright) and
+  screenshots the real rendered page. Full fidelity: threads, the OP's own
+  replies, authenticated/private posts, X Articles, and lazy-loaded content.
+- **Card mode (`--card`)** — draws a clean, styled card for a single public
+  tweet from the public syndication API. Fast, no browser, no login.
 
 ## Features
 
-- Captures the full tweet/thread content including OP's own replies
-- Crops out sidebars, recommendations, and "Discovery more" sections
-- Supports authenticated sessions for viewing replies (requires X cookies)
+### Browser mode (default)
+
+- Captures the full tweet/thread including the OP's own replies (`--replies`)
+- Crops sidebars, recommendations, and "Discover more" sections
+- Authenticated sessions for replies / articles / private posts (X cookies)
 - Handles lazy-loaded content via incremental scrolling
-- Vision-model assisted boundary detection (optional, via NVIDIA API)
-- Auto-loads auth tokens from `~/.zshrc` (no need to pass CLI flags)
-- Waits for graphs/charts to fully render before capturing
+- Optional vision-model boundary detection (NVIDIA API)
+- Auto-loads auth tokens from `~/.zshrc`
+
+### Card mode (`--card`)
+
+- Twitter-style card: avatar, display name, conditional verified badge,
+  handle, body text, timestamp
+- Inline color emoji (Apple Color Emoji / Noto), graceful fallback if absent
+- Attached photos in a 1–4 grid with rounded corners
+- Pixel-accurate wrapping (incl. CJK), long-URL breaking, `t.co` expansion,
+  HTML unescaping
+- No dependencies beyond Pillow; works offline against any public tweet
 
 ## Requirements
 
 ```bash
-pip install pillow
-pip install playwright
+# Browser mode
+pip install playwright pillow
 playwright install chromium
+
+# Card mode only
+pip install pillow
 ```
+
+Card mode uses a monospace font (Hack Nerd Font by default, falling back to
+Menlo / DejaVu Sans Mono); override with `X2PNG_FONT` / `X2PNG_FONT_BOLD`, and
+the color-emoji font with `X2PNG_EMOJI_FONT`.
 
 ## Usage
 
 ```bash
-# Public tweets (no auth needed)
+# Browser mode (default) — full-fidelity screenshot
 python3 x_to_png.py "https://x.com/user/status/123456"
+python3 x_to_png.py "https://x.com/user/status/123456" out.png --replies 6
+python3 x_to_png.py "https://x.com/user/status/123456" --auth-token TOKEN --ct0 CT0
 
-# Specify output path
-python3 x_to_png.py "https://x.com/user/status/123456" output.png
+# Card mode — fast offline card for a single public tweet
+python3 x_to_png.py --card "https://x.com/user/status/123456"
+python3 x_to_png.py --card 123456 card.png --text "Full text for long/Blue tweets"
 
-# With authentication (for replies, articles, private posts)
-python3 x_to_png.py "https://x.com/user/status/123456" \
-    --auth-token TOKEN --ct0 CT0
-
-# Include OP's own replies (thread continuation)
-python3 x_to_png.py "https://x.com/user/status/123456" --replies 6
-
-# Include ALL of the OP's own replies
-python3 x_to_png.py "https://x.com/user/status/123456" --replies all
-
-# Verbose output
-python3 x_to_png.py "https://x.com/user/status/123456" \
-    --auth-token TOKEN --ct0 CT0 --verbose
+# The x-to-png wrapper works the same way
+./x-to-png --card 123456 card.png
 ```
 
-### Auth Token Setup
+### Auth token setup (browser mode)
 
-The script automatically loads `X_AUTH_TOKEN` and `X_CT0` from `~/.zshrc`.
-Add these exports to your `~/.zshrc`:
+Browser mode auto-loads `X_AUTH_TOKEN` and `X_CT0` from `~/.zshrc`:
 
 ```bash
 export X_AUTH_TOKEN="your_auth_token"
 export X_CT0="your_ct0_token"
 ```
 
-Then run `source ~/.zshrc`. No need to pass `--auth-token` or `--ct0` flags.
-
-### Getting Auth Cookies
-
-1. Open x.com in your browser and log in
-2. Open DevTools (F12) → Application → Cookies → `https://x.com`
-3. Copy the `auth_token` and `ct0` cookie values
+Get the cookies from DevTools → Application → Cookies → `https://x.com`
+(`auth_token` and `ct0`). Required for X Articles, private posts, and full
+reply threads.
 
 ## Options
 
-| Flag             | Description                                               |
-| ---------------- | --------------------------------------------------------- |
-| `url`            | Full URL to the X post (required)                         |
-| `output`         | Output PNG path (default: `<tweet_id>.png`)               |
-| `--auth-token`   | X auth_token cookie for logged-in content                 |
-| `--ct0`          | X ct0 CSRF cookie (recommended with --auth-token)        |
-| `--replies N`    | Include N of the OP's own replies (default: 0)           |
-| `--replies all`  | Include ALL of the OP's own replies                      |
-| `--retries N`    | Number of attempts if content doesn't load (default: 1)  |
-| `-v, --verbose`  | Print detailed progress                                   |
-| `-q, --quiet`    | Suppress all output except errors                        |
+| Flag            | Mode    | Description                                            |
+| --------------- | ------- | ----------------------------------------------------- |
+| `url` / `id`    | both    | X post URL (browser) or URL/ID (card)                 |
+| `output`        | both    | Output PNG path (default: `<tweet_id>.png`)           |
+| `--card`        | switch  | Use the offline card renderer instead of screenshots  |
+| `--auth-token`  | browser | X auth_token cookie for logged-in content             |
+| `--ct0`         | browser | X ct0 CSRF cookie (recommended with `--auth-token`)   |
+| `--replies N`   | browser | Include N of the OP's own replies (`all` for every)   |
+| `--retries N`   | browser | Attempts if content doesn't load (default: 1)         |
+| `-v/--verbose`  | browser | Print detailed progress                               |
+| `-q/--quiet`    | browser | Suppress all output except errors                     |
+| `--text`        | card    | Full tweet text (bypasses ~280-char API truncation)   |
+| `--local`       | card    | Render timestamp in local time instead of UTC         |
+| `--force`       | card    | Overwrite the output file if it exists                |
 
-## How It Works
+## How it works
 
-1. Visits x.com to establish a session
-2. Navigates to the post URL
-3. Waits for content to render
-4. Incrementally scrolls down to load all lazy content (replies, etc.)
-5. Captures a full-page screenshot
-6. Crops to the content column, removing sidebars
-7. Trims recommendations using pixel density analysis
-8. Crops at the last article boundary (before "Discovery more")
-9. Optionally uses NVIDIA vision model for boundary detection
+**Browser mode:** establishes a session, navigates to the post, waits for
+render, scrolls to load lazy content, screenshots the full page, crops to the
+content column, trims recommendations by pixel density, and cuts at the last
+article boundary (optionally vision-assisted).
+
+**Card mode:** fetches tweet metadata from the syndication API (no auth),
+expands `t.co` links, wraps text to a fixed width, and composites a rounded
+card with avatar, emoji, and any attached photos using Pillow.
 
 ## Tests
 
 ```bash
-python3 test_x_to_png.py
-# or
-python3 -m pytest test_x_to_png.py -v
+pip install pytest
+pytest              # 157 offline tests (browser + card); network test excluded
+pytest -m network   # opt-in: one live syndication fetch (card mode)
 ```
-
-39 tests covering URL validation, content boundary detection,
-recommendation trimming, scrolling, CLI flags, and full layout simulation.
 
 ## License
 
-MIT License
-
-Copyright (c) 2026 Shaozhi
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+MIT — see [LICENSE](LICENSE). Copyright (c) 2026 Shaozhi.
