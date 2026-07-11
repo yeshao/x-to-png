@@ -939,79 +939,60 @@ def _x_to_png_single(url, output_path, auth_token, ct0, replies, verbose, attemp
 # ---------------------------------------------------------------------------
 
 
-def main():
-    # Fast offline card renderer (syndication API, no browser). Handled before
-    # the Playwright argparse so --card works even without playwright installed.
-    argv = sys.argv[1:]
-    if "--card" in argv:
-        import card_renderer
-        card_renderer.main([a for a in argv if a != "--card"])
-        return
+# -- Engine selection ----------------------------------------------------------
 
-    parser = argparse.ArgumentParser(
-        description="Convert an X post to a single-column PNG",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  %(prog)s "https://x.com/user/status/123456"
-  %(prog)s "https://x.com/user/status/123456" output.png
-  %(prog)s "https://x.com/user/status/123456" --auth-token TOKEN --verbose
-        """,
-    )
-    parser.add_argument("url", help="Full URL to the X post")
-    parser.add_argument(
-        "--card",
-        action="store_true",
-        help="Use the fast offline card renderer (syndication API, no browser) "
-        "instead of screenshotting a single public tweet",
-    )
-    parser.add_argument(
-        "output",
-        nargs="?",
-        default=None,
-        help="Output PNG path (default: <tweet_id>.png)",
-    )
-    parser.add_argument(
-        "--auth-token",
-        default=None,
-        help="X auth_token cookie for logged-in content (Articles, private posts)",
-    )
-    parser.add_argument(
-        "--ct0",
-        default=None,
-        help="X ct0 CSRF cookie (recommended with --auth-token)",
-    )
-    parser.add_argument(
-        "--replies",
-        type=int,
-        default=0,
-        help="Include the first N reply comments in the screenshot (default: 0)",
-    )
-    parser.add_argument(
-        "--retries",
-        type=int,
-        default=1,
-        help="Number of attempts if content doesn't load (default: 1)",
-    )
-    parser.add_argument(
-        "-v", "--verbose", action="store_true", help="Print detailed progress"
-    )
-    parser.add_argument(
-        "-q", "--quiet", action="store_true", help="Suppress all output except errors"
-    )
-    args = parser.parse_args()
+def _playwright_available():
+    import importlib.util
+    return importlib.util.find_spec("playwright") is not None
 
-    verbose = args.verbose and not args.quiet
 
+def _is_article_url(url):
+    import re
+    return bool(re.search(r"/i/article/|/article/", url or "", re.I))
+
+
+def _replies_requested(replies):
+    try:
+        return int(replies) > 0
+    except (TypeError, ValueError):
+        return bool(replies)
+
+
+def select_engine(args, playwright_available):
+    """Pick 'card' or 'browser' from cheap signals. Returns (engine, reason)."""
+    if getattr(args, "card", False):
+        return "card", "forced by --card"
+    if getattr(args, "browser", False):
+        return "browser", "forced by --browser"
+    if not playwright_available:
+        return "card", "no browser engine (playwright) installed"
+    if _replies_requested(getattr(args, "replies", 0)):
+        return "browser", "replies/thread requested"
+    if getattr(args, "auth_token", None) or getattr(args, "ct0", None):
+        return "browser", "authenticated content requested"
+    if _is_article_url(getattr(args, "url", "")):
+        return "browser", "X Article URL"
+    return "card", "simple public tweet (speed-first)"
+
+
+def _card_insufficient(tweet, text_override):
+    """After a card fetch, decide whether the content needs the browser engine."""
+    import card_renderer
+    rich = tweet.get("rich") or {}
+    if rich.get("video"):
+        return True, "video/GIF media"
+    if rich.get("quote"):
+        return True, "quoted tweet"
+    if not text_override and card_renderer.is_truncated(tweet.get("text", "")):
+        return True, "truncated long tweet"
+    return False, ""
+
+
+def _run_browser(args, verbose):
     try:
         output = x_to_png(
-            args.url,
-            args.output,
-            args.auth_token,
-            verbose=verbose,
-            retries=args.retries,
-            replies=args.replies,
-            ct0=args.ct0,
+            args.url, args.output, args.auth_token, verbose=verbose,
+            retries=args.retries, replies=args.replies, ct0=args.ct0,
         )
         if not args.quiet:
             print(f"\nDone! Output: {output}")
@@ -1021,6 +1002,120 @@ Examples:
     except Exception as e:
         log_error(f"Failed to capture post: {e}")
         sys.exit(1)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Convert an X post to a PNG. Auto-selects the browser engine "
+        "(full fidelity) or the offline card renderer; override with --browser/--card.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Engines:
+  auto (default)  Card renderer for a simple public tweet; browser for
+                  replies/threads, Articles, authenticated posts, rich media,
+                  or when the card fetch fails.
+  --card          Force the offline card renderer (syndication API, no browser).
+  --browser       Force the browser screenshot engine.
+
+Examples:
+  %(prog)s "https://x.com/user/status/123456"
+  %(prog)s "https://x.com/user/status/123456" out.png --replies 6
+  %(prog)s --card "https://x.com/user/status/123456" card.png
+        """,
+    )
+    parser.add_argument("url", help="Full URL to the X post (or a tweet ID with --card)")
+    parser.add_argument("output", nargs="?", default=None,
+                        help="Output PNG path (default: <tweet_id>.png)")
+    parser.add_argument("--card", action="store_true",
+                        help="Force the offline card renderer (syndication API, no browser)")
+    parser.add_argument("--browser", action="store_true",
+                        help="Force the browser screenshot engine")
+    parser.add_argument("--auth-token", default=None,
+                        help="X auth_token cookie for logged-in content (Articles, private posts)")
+    parser.add_argument("--ct0", default=None,
+                        help="X ct0 CSRF cookie (recommended with --auth-token)")
+    parser.add_argument("--replies", type=int, default=0,
+                        help="(browser) Include the first N reply comments (default: 0)")
+    parser.add_argument("--retries", type=int, default=1,
+                        help="(browser) Attempts if content doesn't load (default: 1)")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Print detailed progress")
+    parser.add_argument("-q", "--quiet", action="store_true",
+                        help="Suppress all output except errors")
+    parser.add_argument("--text", default=None,
+                        help="(card) Full tweet text, bypassing ~280-char API truncation")
+    parser.add_argument("--local", action="store_true",
+                        help="(card) Render the timestamp in local time instead of UTC")
+    parser.add_argument("--force", action="store_true",
+                        help="(card) Overwrite the output file if it exists")
+    args = parser.parse_args()
+
+    if args.card and args.browser:
+        parser.error("--card and --browser are mutually exclusive")
+    verbose = args.verbose and not args.quiet
+    pw = _playwright_available()
+    engine, reason = select_engine(args, pw)
+    if verbose:
+        log_info(f"Engine: {engine} ({reason})", verbose)
+
+    if engine == "browser":
+        if not pw:
+            log_error("Browser engine needs Playwright: "
+                      "pip install playwright && playwright install chromium")
+            sys.exit(2)
+        _run_browser(args, verbose)
+        return
+
+    # -- Card engine (speed-first, with automatic escalation) --
+    import card_renderer
+    try:
+        status_id = card_renderer.parse_input(args.url)
+    except ValueError as e:
+        if not args.card and pw:
+            log_info(f"Not a plain tweet URL ({e}); using browser", verbose)
+            _run_browser(args, verbose)
+            return
+        parser.error(str(e))
+        return
+
+    try:
+        card_renderer.fnt(21)
+    except card_renderer.FontError as e:
+        print(f"❌ {e}", file=sys.stderr)
+        sys.exit(1)
+
+    base_url = os.environ.get("X2PNG_BASE_URL", "https://cdn.syndication.twimg.com")
+    try:
+        tweet = card_renderer.fetch_tweet(status_id, base_url=base_url)
+    except card_renderer.FetchError as e:
+        if not args.card and pw:
+            log_info(f"Card fetch failed ({e}); falling back to browser", verbose)
+            _run_browser(args, verbose)
+            return
+        print(f"❌ {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.text:
+        tweet["text"] = card_renderer.clean_text(args.text)
+
+    if not args.card and pw:
+        insufficient, why = _card_insufficient(tweet, args.text)
+        if insufficient:
+            log_info(f"Card can't fully render this ({why}); using browser", verbose)
+            _run_browser(args, verbose)
+            return
+
+    out = args.output or f"tweet_{status_id}.png"
+    if os.path.exists(out) and not args.force:
+        print(f"❌ {out} already exists. Pass --force to overwrite.", file=sys.stderr)
+        sys.exit(1)
+    if not args.text and card_renderer.is_truncated(tweet["text"]):
+        print("⚠️  Tweet text may be truncated (long / Blue tweet). "
+              "Pass --text with the full text.", file=sys.stderr)
+
+    _, (w, h) = card_renderer.render(tweet, out, local_time=args.local)
+    if not args.quiet:
+        print(f"{tweet['display_name']} {tweet['handle']}: {len(tweet['text'])} chars")
+        print(f"✅ {out}  ({w} × {h} px)")
 
 
 if __name__ == "__main__":

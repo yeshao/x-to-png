@@ -465,10 +465,16 @@ def _tweet_from_payload(data, status_id):
         raise FetchError(f"Tweet {status_id} has no text — it may be deleted or a tombstone.")
     text = clean_text(expand_urls(raw, data.get("entities")))
     media = []
+    media_types = []
     for m in (data.get("mediaDetails") or []):
         u = m.get("media_url_https") or m.get("media_url")
         if u:
             media.append(u)
+        media_types.append(m.get("type") or "photo")
+    rich = {
+        "video": any(t in ("video", "animated_gif") for t in media_types),
+        "quote": bool(data.get("quoted_tweet")),
+    }
     return {
         "display_name": clean_text(user.get("name", "Unknown")),
         "handle": "@" + user.get("screen_name", "unknown"),
@@ -477,6 +483,7 @@ def _tweet_from_payload(data, status_id):
         "timestamp": data.get("created_at", ""),
         "verified": bool(user.get("is_blue_verified") or user.get("verified")),
         "media": media[:4],
+        "rich": rich,
     }
 
 
