@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
-"""Thin CLI wrapper — implementation lives in x_to_png.py (importable for tests)."""
+"""Thin CLI wrapper for x_to_png.main().
+
+Uses realpath() so the command still finds its sibling modules
+(x_to_png.py, card_renderer.py) when invoked through a symlink — e.g.
+  ~/bin/x-to-png -> ~/projects/x-to-png/x-to-png
+"""
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 from x_to_png import main
 
 if __name__ == "__main__":
