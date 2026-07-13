@@ -448,6 +448,33 @@ def find_post_boundary_y(page, replies=0):
 # ---------------------------------------------------------------------------
 
 
+def get_article_right_edge(page):
+    """Get the right edge of the first tweet/article element in viewport coords.
+
+    Returns a dict with ``right``, ``left``, ``width`` or raises RuntimeError
+    if no article element is found.
+    """
+    raw = page.evaluate("""
+    (function() {
+        var article = document.querySelector('article');
+        if (!article) return JSON.stringify({error: 'no article found'});
+        var rect = article.getBoundingClientRect();
+        return JSON.stringify({
+            right: Math.round(rect.right),
+            left: Math.round(rect.left),
+            width: Math.round(rect.width),
+        });
+    })()
+    """)
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError) as err:
+        raise RuntimeError(f"Failed to parse article rect: {raw!r}") from err
+    if "error" in data:
+        raise RuntimeError(data["error"])
+    return data
+
+
 def find_content_horizontal_bounds(img, min_block_width=40, merge_gap=15):
     """Find the right edge of the main (center) content column.
 
@@ -857,6 +884,22 @@ def _x_to_png_single(url, output_path, auth_token, ct0, replies, verbose, attemp
 
         log_info(f"Content column: x={col_x}, width={col_w}", verbose)
 
+        # Step 4c.5: Get article right edge from DOM (more reliable than
+        # pixel analysis for the horizontal crop).  The first <article> in
+        # the content column bounds the tweet; its getBoundingClientRect()
+        # right edge maps 1:1 onto the screenshot.
+        dom_right_edge = None
+        try:
+            article_edge = get_article_right_edge(page)
+            dom_right_edge = article_edge["right"] - col_x
+            log_info(
+                f"DOM article right edge: {article_edge['right']} "
+                f"(viewport), {dom_right_edge} (cropped)",
+                verbose,
+            )
+        except RuntimeError as e:
+            log_info(f"DOM article edge unavailable: {e}", verbose)
+
         # Step 4d: Re-measure the boundary in the final layout; its page
         # coordinates map 1:1 onto the screenshot.  The preliminary
         # boundary (measured in the 900px scroll viewport) can be short of
@@ -907,7 +950,15 @@ def _x_to_png_single(url, output_path, auth_token, ct0, replies, verbose, attemp
             cropped = img.crop((col_x, 0, col_x + col_w, full_h))
 
             # Step 7a: Horizontal crop (remove side panel)
-            content_right = find_content_horizontal_bounds(cropped)
+            # Prefer the DOM-based article right edge (accurate to the
+            # pixel) over the pixel-density heuristic, which can clip the
+            # rightmost text on tall images.
+            if dom_right_edge and 0 < dom_right_edge <= cropped.width:
+                content_right = dom_right_edge
+                log_info(f"Horizontal crop (DOM): content_right={content_right}", verbose)
+            else:
+                content_right = find_content_horizontal_bounds(cropped)
+                log_info(f"Horizontal crop (pixel): content_right={content_right}", verbose)
             cropped = cropped.crop((0, 0, content_right, cropped.height))
 
             # Step 7b: Boundary fallbacks when the DOM gave nothing usable:
