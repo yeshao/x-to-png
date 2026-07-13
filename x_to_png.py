@@ -44,7 +44,7 @@ from PIL import Image
 # ---------------------------------------------------------------------------
 
 
-def _parse_zshrc_env(filepath):
+def _parse_shellrc_env(filepath):
     """Parse export KEY="VALUE" or export KEY='VALUE' lines from a shell rc file."""
     env_vars = {}
     if not os.path.isfile(filepath):
@@ -64,18 +64,28 @@ def _parse_zshrc_env(filepath):
     return env_vars
 
 
-def load_x_auth_from_zshrc():
-    """Return (auth_token, ct0) from ~/.zshrc exports, filling env vars as side effect."""
-    zshrc_path = os.path.expanduser("~/.zshrc")
-    parsed = _parse_zshrc_env(zshrc_path)
-    auth_token = parsed.get("X_AUTH_TOKEN", "")
-    ct0 = parsed.get("X_CT0", "")
-    # Also propagate to os.environ so child processes and future calls see them
+def load_x_auth_from_shellrc():
+    """Return (auth_token, ct0) found in ~/.zshrc or ~/.bashrc exports.
+
+    Checks ~/.zshrc first, then ~/.bashrc as fallback.  Found values are
+    propagated to os.environ so child processes and future calls see them.
+    """
+    auth_token = None
+    ct0 = None
+    for rc_path in ("~/.zshrc", "~/.bashrc"):
+        parsed = _parse_shellrc_env(os.path.expanduser(rc_path))
+        if not auth_token:
+            auth_token = parsed.get("X_AUTH_TOKEN") or parsed.get("TWITTER_AUTH_TOKEN")
+        if not ct0:
+            ct0 = parsed.get("X_CT0") or parsed.get("TWITTER_CT0")
+        if auth_token and ct0:
+            break
+    # Propagate to os.environ so child processes and future calls see them
     if auth_token and not os.environ.get("X_AUTH_TOKEN"):
         os.environ["X_AUTH_TOKEN"] = auth_token
     if ct0 and not os.environ.get("X_CT0"):
         os.environ["X_CT0"] = ct0
-    return auth_token or None, ct0 or None
+    return auth_token, ct0
 
 
 # ---------------------------------------------------------------------------
@@ -225,13 +235,12 @@ def detect_discovery_more_vision(screenshot_path, verbose=True):
 
         api_key = os.environ.get("NVIDIA_API_KEY", "")
         if not api_key:
-            zshrc = os.path.expanduser("~/.zshrc")
-            if os.path.exists(zshrc):
-                with open(zshrc) as f:
-                    for line in f:
-                        if "NVIDIA_API_KEY" in line and "export" in line:
-                            api_key = line.split("=")[1].strip().strip('"').strip("'")
-                            break
+            # Auto-load from ~/.zshrc or ~/.bashrc
+            for rc_path in ("~/.zshrc", "~/.bashrc"):
+                parsed = _parse_shellrc_env(os.path.expanduser(rc_path))
+                api_key = parsed.get("NVIDIA_API_KEY", "")
+                if api_key:
+                    break
         if not api_key:
             return -1
 
@@ -634,21 +643,29 @@ def x_to_png(
 ):
     validate_url(url)
 
-    if not auth_token:
-        auth_token = (
-            os.environ.get("X_AUTH_TOKEN")
-            or os.environ.get("TWITTER_AUTH_TOKEN")
-            or None
-        )
-        if auth_token:
-            log_info(
-                "Using auth token from X_AUTH_TOKEN/TWITTER_AUTH_TOKEN env var", verbose
+    # Auto-load auth tokens from shell rc files (~/.zshrc, ~/.bashrc)
+    # when not provided via CLI flags or environment variables.
+    if not auth_token or not ct0:
+        rc_auth_token, rc_ct0 = load_x_auth_from_shellrc()
+        if not auth_token:
+            auth_token = (
+                os.environ.get("X_AUTH_TOKEN")
+                or os.environ.get("TWITTER_AUTH_TOKEN")
+                or rc_auth_token
             )
-
-    if not ct0:
-        ct0 = os.environ.get("X_CT0") or os.environ.get("TWITTER_CT0") or None
-        if ct0:
-            log_info("Using ct0 from X_CT0/TWITTER_CT0 env var", verbose)
+            if auth_token:
+                log_info(
+                    "Using auth token from X_AUTH_TOKEN/TWITTER_AUTH_TOKEN env var or shell rc",
+                    verbose,
+                )
+        if not ct0:
+            ct0 = (
+                os.environ.get("X_CT0")
+                or os.environ.get("TWITTER_CT0")
+                or rc_ct0
+            )
+            if ct0:
+                log_info("Using ct0 from X_CT0/TWITTER_CT0 env var or shell rc", verbose)
 
     if output is None:
         tweet_id = url.rstrip("/").split("/")[-1].split("?")[0].split("#")[0]
